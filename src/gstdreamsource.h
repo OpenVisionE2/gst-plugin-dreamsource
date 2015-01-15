@@ -32,6 +32,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
+#include "gstdreamsource-marshal.h"
+
 G_BEGIN_DECLS
 
 typedef struct _CompressedBufferDescriptor CompressedBufferDescriptor;

@@ -28,9 +28,16 @@ GST_DEBUG_CATEGORY_STATIC (dreamaudiosource_debug);
 
 enum
 {
-  ARG_0,
-  ARG_BITRATE,
+	SIGNAL_GET_BASE_PTS,
+	LAST_SIGNAL
 };
+enum
+{
+	ARG_0,
+	ARG_BITRATE,
+};
+
+static guint gst_dreamaudiosource_signals[LAST_SIGNAL] = { 0 };
 
 #define DEFAULT_BITRATE 128
 
@@ -54,6 +61,7 @@ static GstFlowReturn gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer *
 
 static void gst_dreamaudiosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec);
 static void gst_dreamaudiosource_get_property (GObject * object, guint prop_id, GValue * value, GParamSpec * pspec);
+static gint64 gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self);
 
 static void
 gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
@@ -90,13 +98,29 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
 	    "Bitrate in kbit/sec", 16, 320, DEFAULT_BITRATE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	
+	gst_dreamaudiosource_signals[SIGNAL_GET_BASE_PTS] =
+		g_signal_new ("get-base-pts",
+		G_TYPE_FROM_CLASS (klass),
+		G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
+		G_STRUCT_OFFSET (GstDreamAudioSourceClass, get_base_pts),
+		NULL, NULL, gst_dreamsource_marshal_INT64__VOID, G_TYPE_INT64, 0);
 
+	klass->get_base_pts = gst_dreamaudiosource_get_base_pts;
+
+}
+
+static gint64
+gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self)
+{
+	GST_DEBUG_OBJECT (self, "gst_dreamaudiosource_get_base_pts " GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
+	return self->base_pts;
 }
 
 gboolean
 gst_dreamaudiosource_plugin_init (GstPlugin *plugin)
 {
-	GST_DEBUG_CATEGORY_INIT (dreamaudiosource_debug, "dreamsource", 0, "dreamaudiosource");
+	GST_DEBUG_CATEGORY_INIT (dreamaudiosource_debug, "dreamaudiosource", 0, "dreamaudiosource");
 	return gst_element_register (plugin, "dreamaudiosource", GST_RANK_PRIMARY, GST_TYPE_DREAMAUDIOSOURCE);
 }
 
@@ -105,7 +129,8 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 {
 	self->encoder = NULL;
 	self->descriptors_available = 0;
-	self->first_dts = GST_CLOCK_TIME_NONE;
+	self->base_pts = GST_CLOCK_TIME_NONE;
+	g_mutex_init (&self->mutex);
 	
 	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
 	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
@@ -175,12 +200,6 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (psrc);
 	EncoderInfo *enc = self->encoder;
-		
-	GstClock *clock;
-	GstClockTime time = GST_CLOCK_TIME_NONE;
-	GstClockTime running_time;
-	clock = gst_element_get_clock (GST_ELEMENT (self));
-	
 	static int dumpoffset;
 
 	GST_LOG_OBJECT (self, "new buffer requested");
@@ -190,86 +209,99 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 		return GST_FLOW_ERROR;
 	}
 
-	if (self->descriptors_available == 0)
+	
+	while (1)
 	{
-		self->descriptors_count = 0;
-		int rlen = read(enc->fd, enc->buffer, ABUFSIZE);
-		if (rlen <= 0 || rlen % ABDSIZE ) {
-			GST_WARNING_OBJECT (self, "read error %d (errno %i)", rlen, errno);
-			return GST_FLOW_ERROR;
-		}
-		self->descriptors_available = rlen / ABDSIZE;
-		GST_LOG_OBJECT (self, "encoder buffer was empty, %d descriptors available", self->descriptors_available);
-	}
-
-	while (self->descriptors_count < self->descriptors_available) {
-		off_t offset = self->descriptors_count * ABDSIZE;
-		AudioBufferDescriptor *desc = (AudioBufferDescriptor*)(&enc->buffer[offset]);
-
-		uint32_t f = desc->stCommon.uiFlags;
-
-		GST_DEBUG_OBJECT (self, "descriptors_count=%d, descriptors_available=%u\tuiOffset=%u, uiLength=%"G_GSIZE_FORMAT"", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
-
-		if (f & CDB_FLAG_METADATA) { 
-			GST_LOG_OBJECT (self, "CDB_FLAG_METADATA... skip outdated packet");
-			self->descriptors_count = self->descriptors_available;
-			*outbuf = gst_buffer_new();
-			continue;
-		}
-
-		*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, (GDestroyNotify)gst_dreamaudiosource_free_buffer);
-
-		if (f & CDB_FLAG_PTS_VALID)
+		*outbuf = NULL;
+		
+		if (self->descriptors_available == 0)
 		{
-			if (G_UNLIKELY (self->first_dts == GST_CLOCK_TIME_NONE))
-			{
-				self->first_dts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				GST_DEBUG_OBJECT (self, "self->first_dts=%" GST_TIME_FORMAT"", GST_TIME_ARGS (self->first_dts) );
+			self->descriptors_count = 0;
+			int rlen = read(enc->fd, enc->buffer, ABUFSIZE);
+			if (rlen <= 0 || rlen % ABDSIZE ) {
+				GST_WARNING_OBJECT (self, "read error %d (errno %i)", rlen, errno);
+				return GST_FLOW_ERROR;
+			}
+			self->descriptors_available = rlen / ABDSIZE;
+			GST_LOG_OBJECT (self, "encoder buffer was empty, %d descriptors available", self->descriptors_available);
+		}
+
+		while (self->descriptors_count < self->descriptors_available) {
+			off_t offset = self->descriptors_count * ABDSIZE;
+			AudioBufferDescriptor *desc = (AudioBufferDescriptor*)(&enc->buffer[offset]);
+
+			uint32_t f = desc->stCommon.uiFlags;
+
+			GST_LOG_OBJECT (self, "descriptors_count=%d, descriptors_available=%u\tuiOffset=%u, uiLength=%"G_GSIZE_FORMAT"", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
+
+			if (f & CDB_FLAG_METADATA) { 
+				GST_LOG_OBJECT (self, "CDB_FLAG_METADATA... skip outdated packet");
+				self->descriptors_count = self->descriptors_available;
+				continue;
 			}
 			
-			if (clock != NULL) {
-				GstClockTime base_time, buffer_time;
-				time = gst_clock_get_time (clock);
-				GST_INFO_OBJECT (self, "gst_clock_get_time=%" GST_TIME_FORMAT"", GST_TIME_ARGS(time));
-				base_time = gst_element_get_base_time (GST_ELEMENT (self));
-				GST_INFO_OBJECT (self, "gst_element_get_base_time=%" GST_TIME_FORMAT"",GST_TIME_ARGS( base_time));
-				running_time = time - base_time;
-				GST_INFO_OBJECT (self, "running_time=%" GST_TIME_FORMAT"", GST_TIME_ARGS(running_time));
-				buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS)-self->first_dts/*+running_time*/;
-				GST_BUFFER_PTS(*outbuf) = buffer_time;
-				GST_BUFFER_DTS(*outbuf) = buffer_time;
-				GST_INFO_OBJECT (self, "buffer_time=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_time));
+			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, (GDestroyNotify)gst_dreamaudiosource_free_buffer);
+			
+			if (f & CDB_FLAG_PTS_VALID)
+			{
+				if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
+				{
+					if (self->dreamvideosrc)
+					{
+						g_mutex_lock (&self->mutex);
+						guint64 videosource_base_pts;
+						g_signal_emit_by_name(self->dreamvideosrc, "get-base-pts", &videosource_base_pts);
+						if (videosource_base_pts != GST_CLOCK_TIME_NONE)
+						{
+							GST_DEBUG_OBJECT (self, "use DREAMVIDEOSOURCE's base_pts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (videosource_base_pts) );
+							self->base_pts = videosource_base_pts;
+						}
+						g_mutex_unlock (&self->mutex);
+					}
+					else
+					{
+						self->base_pts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+						GST_DEBUG_OBJECT (self, "use mpeg stream pts as base_pts=%" GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
+					}
+				}
+				GstClockTime buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_time > self->base_pts )
+				{
+					buffer_time -= self->base_pts;
+					GST_BUFFER_PTS(*outbuf) = buffer_time;
+					GST_BUFFER_DTS(*outbuf) = buffer_time;
+				}
 				
-			} else {
-				GST_ERROR_OBJECT (self, "NO CLOCK!!!");
 			}
-		}
-
-		int wret = 0;
+			
 #ifdef dump
-		wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
-		dumpoffset += wret;
-		GST_LOG_OBJECT (self, "read %"G_GSIZE_FORMAT" dumped %i total 0x%08X", desc->stCommon.uiLength, wret, dumpoffset );
+			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
+			dumpoffset += wret;
+			GST_LOG_OBJECT (self, "read %"G_GSIZE_FORMAT" dumped %i total 0x%08X", desc->stCommon.uiLength, wret, dumpoffset );
 #endif
+			self->descriptors_count++;
 
-		self->descriptors_count++;
-
-		break;
-	}
-
-	if (self->descriptors_count == self->descriptors_available) {
-		GST_LOG_OBJECT (self, "self->descriptors_count == self->descriptors_available -> release %i consumed descriptors", self->descriptors_count);
-		/* release consumed descs */
-		if (write(enc->fd, &self->descriptors_count, 4) != 4) {
-			GST_WARNING_OBJECT (self, "release consumed descs write error!");
-			return GST_FLOW_ERROR;
+			break;
 		}
-		self->descriptors_available = 0;
+
+		if (self->descriptors_count == self->descriptors_available) {
+			GST_LOG_OBJECT (self, "self->descriptors_count == self->descriptors_available -> release %i consumed descriptors", self->descriptors_count);
+			/* release consumed descs */
+			if (write(enc->fd, &self->descriptors_count, 4) != 4) {
+				GST_WARNING_OBJECT (self, "release consumed descs write error!");
+				return GST_FLOW_ERROR;
+			}
+			self->descriptors_available = 0;
+		}
+
+		if (*outbuf)
+		{
+			GST_DEBUG_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
+			return GST_FLOW_OK;
+		}
 	}
 
-	GST_INFO_OBJECT (self, "comitting %" G_GSIZE_FORMAT " bytes", gst_buffer_get_size (*outbuf) );
-	
-	return GST_FLOW_OK;
+	return GST_FLOW_ERROR;
 }
 
 static gboolean
@@ -277,7 +309,6 @@ gst_dreamaudiosource_start (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
 
-	GST_INFO_OBJECT (self, "start");
 
 	char fn_buf[32];
 
@@ -310,24 +341,26 @@ gst_dreamaudiosource_start (GstBaseSrc * bsrc)
 		return FALSE;
 	}
 #ifdef dump
-	self->dumpfd = open("/testProgs/dump.audio", O_WRONLY | O_CREAT | O_TRUNC);
-	GST_INFO_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
+	self->dumpfd = open("/media/hdd/movie/dreamaudiosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
+	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
 #endif
 	
-	GST_INFO_OBJECT (self, "cdb buffer mapped to %08x", self->encoder->cdb);
+	GST_DEBUG_OBJECT (self, "cdb buffer mapped to %08x", self->encoder->cdb);
 	
 	uint32_t abr = self->audio_info.bitrate*1000;
 	int ret = ioctl(self->encoder->fd, AENC_SET_BITRATE, &abr);
-	GST_INFO_OBJECT (self, "set bitrate to %i bytes/s ret=%i", abr, ret);
+	GST_DEBUG_OBJECT (self, "set bitrate to %i bytes/s ret=%i", abr, ret);
 	
 	int rlen = 0;
 	do {
 		rlen = read(self->encoder->fd, self->encoder->buffer, ABUFSIZE);
-		GST_INFO_OBJECT (self, "flushed %d bytes", rlen);
+		GST_DEBUG_OBJECT (self, "flushed %d bytes", rlen);
 	} while (rlen > 0);
 	
 	ret = ioctl(self->encoder->fd, AENC_START);
 	GST_INFO_OBJECT (self, "started encoder! ret=%i", ret);
+	
+	self->dreamvideosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamvideosource0");
 	
 	return TRUE;
 }
@@ -344,7 +377,7 @@ gst_dreamaudiosource_stop (GstBaseSrc * bsrc)
 #ifdef dump
 	close(self->dumpfd);
 #endif
-	GST_INFO_OBJECT (self, "closed");
+	GST_DEBUG_OBJECT (self, "closed");
 	return TRUE;
 }
 
@@ -359,6 +392,7 @@ gst_dreamaudiosource_finalize (GObject * gobject)
 			munmap(self->encoder->cdb, AMMAPSIZE);
 		free(self->encoder);
 	}
+	g_mutex_clear (&self->mutex);
 	GST_DEBUG_OBJECT (self, "finalized");
 	G_OBJECT_CLASS (parent_class)->finalize (gobject);
 }

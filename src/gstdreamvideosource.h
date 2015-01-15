@@ -78,7 +78,7 @@ typedef struct _GstDreamVideoSourceClass   GstDreamVideoSourceClass;
 typedef struct _VideoFormatInfo            VideoFormatInfo;
 typedef struct _VideoBufferDescriptor      VideoBufferDescriptor;
 
-#define dump 1
+// #define dump 1
 
 struct _GstDreamVideoSource
 {
@@ -93,12 +93,16 @@ struct _GstDreamVideoSource
 
 	int dumpfd;
 	
-	GstClockTime first_dts;
+	GstElement *dreamaudiosrc;
+	GstClockTime base_pts;
+	
+	GMutex mutex;
 };
 
 struct _GstDreamVideoSourceClass
 {
 	GstPushSrcClass parent_class;
+	gint64 (*get_base_pts) (GstDreamVideoSource *self);
 };
 
 GType gst_dreamvideosource_get_type (void);

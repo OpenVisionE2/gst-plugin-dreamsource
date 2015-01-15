@@ -2,10 +2,13 @@ glib_enum_prefix = gst_dreamsource
 
 include $(top_srcdir)/common/glib-gen.mak
 
+built_sources = gstdreamsource-marshal.c
+built_headers = gstdreamsource-marshal.h
 BUILT_SOURCES = $(built_sources) $(built_headers)
 # plugindir is set in configure
 
 CLEANFILES = $(BUILT_SOURCES)
+EXTRA_DIST = gstdreamsource-marshal.list
 
 plugin_LTLIBRARIES = libgstdreamsource.la
 

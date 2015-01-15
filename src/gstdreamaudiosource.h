@@ -61,7 +61,7 @@ typedef struct _GstDreamAudioSourceClass   GstDreamAudioSourceClass;
 typedef struct _AudioFormatInfo            AudioFormatInfo;
 typedef struct _AudioBufferDescriptor      AudioBufferDescriptor;
 
-#define dump 1
+// #define dump 1
 
 struct _GstDreamAudioSource
 {
@@ -77,12 +77,16 @@ struct _GstDreamAudioSource
 	int dumpfd;
 	goffset dumpsize;
 	
-	GstClockTime first_dts;
+	GstElement *dreamvideosrc;
+	GstClockTime base_pts;
+	
+	GMutex mutex;
 };
 
 struct _GstDreamAudioSourceClass
 {
 	GstPushSrcClass parent_class;
+	gint64 (*get_base_pts) (GstDreamAudioSource *self);
 };
 
 GType gst_dreamaudiosource_get_type (void);
