@@ -148,6 +148,21 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
 }
 
+static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32_t bitrate)
+{
+	if (!self->encoder || !self->encoder->fd)
+		return;
+	uint32_t vbr = bitrate*1000;		
+	int ret = ioctl(self->encoder->fd, VENC_SET_BITRATE, &vbr);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video bitrate to %i bytes/s!", vbr);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video bitrate to %i kBytes/s", bitrate);
+	self->video_info.bitrate = vbr;
+}
+
 static void
 gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec)
 {
@@ -155,7 +170,7 @@ gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue
 	
 	switch (prop_id) {
 		case ARG_BITRATE:
-			self->video_info.bitrate = g_value_get_int (value);
+			gst_dreamvideosource_set_bitrate(self, g_value_get_int (value));
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -170,7 +185,7 @@ gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * val
 	
 	switch (prop_id) {
 		case ARG_BITRATE:
-			g_value_set_int (value, self->video_info.bitrate);
+			g_value_set_int (value, self->video_info.bitrate/1000);
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -359,12 +374,16 @@ gst_dreamvideosource_start (GstBaseSrc * bsrc)
 	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
 	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
 #endif
-	uint32_t vbr = self->video_info.bitrate*1000;
-	int ret = ioctl(self->encoder->fd, VENC_SET_BITRATE, &vbr);
-	GST_DEBUG_OBJECT (self, "set bitrate to %i bytes/s ret=%i", vbr, ret);
-	
-	ret = ioctl(self->encoder->fd, VENC_START);
-	GST_INFO_OBJECT (self, "started encoder! ret=%i", ret);
+
+	gst_dreamvideosource_set_bitrate(self, DEFAULT_BITRATE);
+
+	int ret = ioctl(self->encoder->fd, VENC_START);
+	if ( ret != 0 )
+	{
+		GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
+		return FALSE;
+	}
+	GST_INFO_OBJECT (self, "started encoder!");
 	
 	self->dreamaudiosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamaudiosource0");
 
