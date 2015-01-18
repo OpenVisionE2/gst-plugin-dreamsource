@@ -107,7 +107,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	gstbsrc_class->get_caps = gst_dreamvideosource_getcaps;
  	gstbsrc_class->set_caps = gst_dreamvideosource_setcaps;
  	gstbsrc_class->fixate = gst_dreamvideosource_fixate;
-	gstbsrc_class->negotiate = gst_dreamvideosource_negotiate;
+// 	gstbsrc_class->negotiate = gst_dreamvideosource_negotiate;
 	gstbsrc_class->start = gst_dreamvideosource_start;
 	gstbsrc_class->stop = gst_dreamvideosource_stop;
 
@@ -118,10 +118,10 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	    "Bitrate in kbit/sec", 16, 200000, DEFAULT_BITRATE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
- 	g_object_class_install_property (gobject_class, ARG_CAPS,
- 	  g_param_spec_boxed ("caps", "Caps",
- 	    "The caps for the source stream", GST_TYPE_CAPS,
- 	    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property (gobject_class, ARG_CAPS,
+	  g_param_spec_boxed ("caps", "Caps",
+	    "The caps for the source stream", GST_TYPE_CAPS,
+	    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_dreamvideosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
@@ -156,8 +156,8 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	self->video_info.height = 720;
 	self->video_info.par_n = 16;
 	self->video_info.par_d = 9;
-	self->video_info.fps_n = 1;
-	self->video_info.fps_d = 25;
+	self->video_info.fps_n = 25;
+	self->video_info.fps_d = 1;
 	self->base_pts = GST_CLOCK_TIME_NONE;
 
 	g_mutex_init (&self->mutex);
@@ -209,7 +209,7 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 	if ( (info->par_n == 5 && info->par_d == 4) || (info->par_n == 16 && info->par_d == 9) )
 	{
 		int venc_size = 0, venc_fps = 0;
-		switch (info->fps_d) {
+		switch (info->fps_n) {
 			case 25:
 				venc_fps = rate_25;
 				break;
@@ -323,7 +323,7 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 	
 	caps = gst_pad_template_get_caps (pad_template);
 	
-	if (self->encoder && self->video_info.width && self->video_info.height & self->video_info.fps_d)
+	if (self->encoder && self->video_info.width && self->video_info.height & self->video_info.fps_n)
 	{
 		caps = gst_caps_make_writable(gst_pad_template_get_caps (pad_template));
 		gst_caps_set_simple(caps, "width", G_TYPE_INT, self->video_info.width, NULL);
@@ -338,21 +338,6 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 		gst_caps_unref (caps);
 		caps = intersection;
 	}	
-
-// 	if (self->encoder == NULL)
-// 	{
-// 		caps = gst_pad_template_get_caps (pad_template);
-// 		GST_LOG_OBJECT (self, "encoder not opened -> use template caps %" GST_PTR_FORMAT, caps);
-// 		return caps;
-// 	}
-// 	else if (!self->video_info.width || !self->video_info.height || !self->video_info.fps_d)
-// 	{
-// 		caps = gst_pad_template_get_caps (pad_template);
-// 		GST_LOG_OBJECT (self, "invalid video_info! -> use template caps %" GST_PTR_FORMAT, caps);
-// 		return caps;
-// 	}
-// 	else
-
 
 	GST_INFO_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
 	return caps;
@@ -387,8 +372,8 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 				info.fps_d = gst_value_get_fraction_denominator (framerate);
 			}
 			else {
-				info.fps_n = 1;
-				info.fps_d = DEFAULT_FRAMERATE;
+				info.fps_n = DEFAULT_FRAMERATE;
+				info.fps_d = 1;
 			}
 			par = gst_structure_get_value (structure, "pixel-aspect-ratio");
 			if (par) {
