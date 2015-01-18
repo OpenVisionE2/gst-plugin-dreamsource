@@ -36,7 +36,23 @@ G_BEGIN_DECLS
 #define VENC_START        _IO('v', 128)
 #define VENC_STOP         _IO('v', 129)
 #define VENC_SET_BITRATE  _IOW('v', 130, unsigned int)
+#define VENC_SET_RESOLUTION _IOW('v', 131, unsigned int)
+#define VENC_SET_FRAMERATE  _IOW('v', 132, unsigned int)
 
+enum venc_framerate {
+        rate_custom = 0,
+        rate_25,
+        rate_30,
+        rate_50,
+        rate_60,
+};
+
+enum venc_videoformat {
+        fmt_custom = 0,
+        fmt_720x576,
+        fmt_1280x720,
+        fmt_1920x1080,
+};
 struct _VideoBufferDescriptor
 {
 	CompressedBufferDescriptor stCommon;

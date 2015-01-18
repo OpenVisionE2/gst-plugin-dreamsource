@@ -64,6 +64,8 @@ G_DEFINE_TYPE (GstDreamVideoSource, gst_dreamvideosource, GST_TYPE_PUSH_SRC);
 static GstCaps *gst_dreamvideosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
 static gboolean gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps);
 static GstCaps *gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps);
+static gboolean gst_dreamvideosource_negotiate (GstBaseSrc * bsrc);
+
 static gboolean gst_dreamvideosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_stop (GstBaseSrc * bsrc);
 static void gst_dreamvideosource_finalize (GObject * gobject);
@@ -80,12 +82,12 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 {
 	GObjectClass *gobject_class;
 	GstElementClass *gstelement_class;
-	GstBaseSrcClass *gstbasesrc_class;
+	GstBaseSrcClass *gstbsrc_class;
 	GstPushSrcClass *gstpush_src_class;
 
 	gobject_class = (GObjectClass *) klass;
 	gstelement_class = (GstElementClass *) klass;
-	gstbasesrc_class = (GstBaseSrcClass *) klass;
+	gstbsrc_class = (GstBaseSrcClass *) klass;
 	gstpush_src_class = (GstPushSrcClass *) klass;
 
 	gobject_class->set_property = gst_dreamvideosource_set_property;
@@ -102,9 +104,12 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	
 	gstelement_class->change_state = gst_dreamvideosource_change_state;
 
-	gstbasesrc_class->get_caps = gst_dreamvideosource_getcaps;
-	gstbasesrc_class->start = gst_dreamvideosource_start;
-	gstbasesrc_class->stop = gst_dreamvideosource_stop;
+	gstbsrc_class->get_caps = gst_dreamvideosource_getcaps;
+ 	gstbsrc_class->set_caps = gst_dreamvideosource_setcaps;
+ 	gstbsrc_class->fixate = gst_dreamvideosource_fixate;
+	gstbsrc_class->negotiate = gst_dreamvideosource_negotiate;
+	gstbsrc_class->start = gst_dreamvideosource_start;
+	gstbsrc_class->stop = gst_dreamvideosource_stop;
 
 	gstpush_src_class->create = gst_dreamvideosource_create;
 	
@@ -112,6 +117,11 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
 	    "Bitrate in kbit/sec", 16, 200000, DEFAULT_BITRATE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+ 	g_object_class_install_property (gobject_class, ARG_CAPS,
+ 	  g_param_spec_boxed ("caps", "Caps",
+ 	    "The caps for the source stream", GST_TYPE_CAPS,
+ 	    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_dreamvideosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
@@ -145,9 +155,9 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	self->video_info.width = 1280;
 	self->video_info.height = 720;
 	self->video_info.par_n = 16;
-	self->video_info.par_d = 16;
-	self->video_info.fps_n = 25;
-	self->video_info.fps_d = 1;
+	self->video_info.par_d = 9;
+	self->video_info.fps_n = 1;
+	self->video_info.fps_d = 25;
 	self->base_pts = GST_CLOCK_TIME_NONE;
 
 	g_mutex_init (&self->mutex);
@@ -174,12 +184,104 @@ static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32
 	g_mutex_unlock (&self->mutex);
 }
 
+static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, VideoFormatInfo * info)
+{
+	if (!self->encoder || !self->encoder->fd)
+	{
+		GST_ERROR_OBJECT (self, "can't set format because encoder device not opened!");
+		return FALSE;
+	}
+	
+	GstState state;
+	gst_element_get_state (GST_ELEMENT(self), &state, NULL, 1*GST_MSECOND);
+	
+	if (state != GST_STATE_PAUSED)
+	{
+		GST_ERROR_OBJECT (self, "can't set format in %s state. must be in PAUSED!", gst_element_state_get_name (state));
+		return FALSE;
+	}
+	
+	GST_OBJECT_LOCK (self);
+// 	g_mutex_lock (&self->mutex);
+
+	GST_INFO_OBJECT (self, "requested to set resolution to %dx%d, framerate to %d/%d aspect_ratio %d/%d", info->width, info->height, info->fps_n, info->fps_d, info->par_n, info->par_d);
+	
+	if ( (info->par_n == 5 && info->par_d == 4) || (info->par_n == 16 && info->par_d == 9) )
+	{
+		int venc_size = 0, venc_fps = 0;
+		switch (info->fps_d) {
+			case 25:
+				venc_fps = rate_25;
+				break;
+			case 30:
+				venc_fps = rate_30;
+				break;
+			case 50:
+				venc_fps = rate_50;
+				break;
+			case 60:
+				venc_fps = rate_60;
+				break;
+			default:
+				GST_ERROR_OBJECT (self, "invalid framerate %d/%d", info->fps_n, info->fps_d);
+				goto fail;
+		}
+		
+		if ( info->width == 720 && info->height == 576 )
+			venc_size = fmt_720x576;
+		else if ( info->width == 1280 && info->height == 720)
+			venc_size = fmt_1280x720;
+		else if ( info->width == 1920 && info->height == 1080)
+			venc_size = fmt_1920x1080;
+		else
+		{
+			GST_ERROR_OBJECT (self, "invalid resolution %dx%d", info->width, info->height);
+			goto fail;
+		}
+			
+		if (!ioctl(self->encoder->fd, VENC_SET_FRAMERATE, &venc_fps))
+			GST_INFO_OBJECT (self, "set framerate to %d/%d -> ioctrl(%d, VENC_SET_FRAMERATE, &%d)", info->fps_n, info->fps_d, self->encoder->fd, venc_fps);
+		else
+		{
+			GST_WARNING_OBJECT (self, "can't set framerate to %d/%d -> ioctrl(%d, VENC_SET_FRAMERATE, &%d)", info->fps_n, info->fps_d, self->encoder->fd, venc_fps);
+			goto fail;
+		}
+
+		if (!ioctl(self->encoder->fd, VENC_SET_RESOLUTION, &venc_size))
+			GST_INFO_OBJECT (self, "set resolution to %dx%d -> ioctrl(%d, VENC_SET_RESOLUTION, &%d)", info->width, info->height, self->encoder->fd, venc_size);
+		else
+		{
+			GST_WARNING_OBJECT (self, "can't set resolution to %dx%d -> ioctrl(%d, VENC_SET_RESOLUTION, &%d)", info->width, info->height, self->encoder->fd, venc_size);
+			goto fail;
+		}
+		
+		self->video_info = *info;
+// 		g_mutex_unlock (&self->mutex);
+		GST_OBJECT_UNLOCK (self);
+		return TRUE;
+	}
+	
+	GST_INFO_OBJECT (self, "invalid aspect!");
+	
+fail:
+// 	g_mutex_unlock (&self->mutex);
+	GST_OBJECT_UNLOCK (self);
+	return FALSE;
+}
+
 static void
 gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (object);
 	
 	switch (prop_id) {
+		case ARG_CAPS:
+		{
+			GstCaps *caps = gst_caps_copy(gst_value_get_caps (value));
+			gst_dreamvideosource_setcaps (GST_BASE_SRC(object), caps);
+			gst_caps_unref(caps);
+			break;
+		}
 		case ARG_BITRATE:
 			gst_dreamvideosource_set_bitrate(self, g_value_get_int (value));
 			break;
@@ -195,6 +297,9 @@ gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * val
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (object);
 	
 	switch (prop_id) {
+		case ARG_CAPS:
+			g_value_take_boxed (value, gst_dreamvideosource_getcaps (GST_BASE_SRC(object), GST_CAPS_ANY));
+			break;
 		case ARG_BITRATE:
 			g_value_set_int (value, self->video_info.bitrate/1000);
 			break;
@@ -213,21 +318,240 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 
 	pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
 	g_return_val_if_fail (pad_template != NULL, NULL);
-
-	if (self->encoder == NULL) {
-		GST_DEBUG_OBJECT (self, "encoder not opened -> use template caps");
-		caps = gst_pad_template_get_caps (pad_template);
-	}
-	else
+	
+	GST_LOG_OBJECT (self, "gst_dreamvideosource_getcaps filter %" GST_PTR_FORMAT, caps);
+	
+	caps = gst_pad_template_get_caps (pad_template);
+	
+	if (self->encoder && self->video_info.width && self->video_info.height & self->video_info.fps_d)
 	{
 		caps = gst_caps_make_writable(gst_pad_template_get_caps (pad_template));
 		gst_caps_set_simple(caps, "width", G_TYPE_INT, self->video_info.width, NULL);
 		gst_caps_set_simple(caps, "height", G_TYPE_INT, self->video_info.height, NULL);
 		gst_caps_set_simple(caps, "framerate", GST_TYPE_FRACTION, self->video_info.fps_n, self->video_info.fps_d, NULL);
+		gst_caps_set_simple(caps, "pixel-aspect-ratio", GST_TYPE_FRACTION, self->video_info.par_n, self->video_info.par_d, NULL);
 	}
+	
+	if (filter) {
+		GstCaps *intersection;
+		intersection = gst_caps_intersect_full (filter, caps, GST_CAPS_INTERSECT_FIRST);
+		gst_caps_unref (caps);
+		caps = intersection;
+	}	
+
+// 	if (self->encoder == NULL)
+// 	{
+// 		caps = gst_pad_template_get_caps (pad_template);
+// 		GST_LOG_OBJECT (self, "encoder not opened -> use template caps %" GST_PTR_FORMAT, caps);
+// 		return caps;
+// 	}
+// 	else if (!self->video_info.width || !self->video_info.height || !self->video_info.fps_d)
+// 	{
+// 		caps = gst_pad_template_get_caps (pad_template);
+// 		GST_LOG_OBJECT (self, "invalid video_info! -> use template caps %" GST_PTR_FORMAT, caps);
+// 		return caps;
+// 	}
+// 	else
+
 
 	GST_INFO_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
 	return caps;
+}
+
+static gboolean
+gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
+{
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
+	GstBaseSrcClass *bclass = GST_BASE_SRC_GET_CLASS (bsrc);
+	GstCaps *current_caps;
+	const GstStructure *structure;
+	VideoFormatInfo info;
+	gboolean ret;
+	int width, height;
+	const GValue *framerate, *par;
+	structure = gst_caps_get_structure (caps, 0);
+	
+	current_caps = gst_pad_get_current_caps (GST_BASE_SRC_PAD (bsrc));
+	if (current_caps && gst_caps_is_equal (current_caps, caps)) {
+		GST_DEBUG_OBJECT (self, "New caps equal to old ones: %" GST_PTR_FORMAT, caps);
+		ret = TRUE;
+	} else {
+		if (gst_structure_has_name (structure, "video/x-h264"))
+		{
+			memset (&info, 0, sizeof(VideoFormatInfo));
+			ret = gst_structure_get_int (structure, "width", &info.width);
+			ret &= gst_structure_get_int (structure, "height", &info.height);
+			framerate = gst_structure_get_value (structure, "framerate");
+			if (framerate) {
+				info.fps_n = gst_value_get_fraction_numerator (framerate);
+				info.fps_d = gst_value_get_fraction_denominator (framerate);
+			}
+			else {
+				info.fps_n = 1;
+				info.fps_d = DEFAULT_FRAMERATE;
+			}
+			par = gst_structure_get_value (structure, "pixel-aspect-ratio");
+			if (par) {
+				info.par_n = gst_value_get_fraction_numerator (par);
+				info.par_d = gst_value_get_fraction_denominator (par);
+			}
+			else {
+				info.par_n = 16;
+				info.par_d = 9;
+			}
+			GST_INFO_OBJECT (self, "set caps %" GST_PTR_FORMAT, caps);
+			if (gst_dreamvideosource_set_format(self, &info))
+				ret = gst_pad_push_event (bsrc->srcpad, gst_event_new_caps (caps));
+		}
+		else {
+			GST_WARNING_OBJECT (self, "unsupported caps: %" GST_PTR_FORMAT, caps);
+			ret = FALSE;
+		}
+	}
+	if (current_caps)
+		gst_caps_unref (current_caps);
+	return ret;
+}
+
+static GstCaps *
+gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
+{
+	GstStructure *structure;
+
+	caps = gst_caps_make_writable (caps);
+	structure = gst_caps_get_structure (caps, 0);
+
+	gst_structure_fixate_field_nearest_int (structure, "width", 1280);
+	gst_structure_fixate_field_nearest_int (structure, "height", 720);
+	gst_structure_fixate_field_nearest_fraction (structure, "framerate", DEFAULT_FRAMERATE, 1);
+
+	if (gst_structure_has_field (structure, "pixel-aspect-ratio"))
+		gst_structure_fixate_field_nearest_fraction (structure, "pixel-aspect-ratio", 16, 9);
+	else
+		gst_structure_set (structure, "pixel-aspect-ratio", GST_TYPE_FRACTION, 16, 9, NULL);
+
+	caps = GST_BASE_SRC_CLASS (parent_class)->fixate (bsrc, caps);
+	GST_DEBUG_OBJECT (bsrc, "fixate caps: %" GST_PTR_FORMAT, caps);
+	return caps;
+}
+
+static gboolean
+gst_dreamvideosource_negotiate (GstBaseSrc * bsrc)
+{
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
+
+	GstState state;
+	GstCaps *thiscaps;
+	GstCaps *caps = NULL;
+	GstCaps *peercaps = NULL;
+	gboolean result = FALSE;
+	
+	gst_element_get_state (GST_ELEMENT(self), &state, NULL, 1*GST_MSECOND);
+	
+	if (state == GST_STATE_PLAYING)
+		return TRUE;
+
+	thiscaps = gst_pad_query_caps (GST_BASE_SRC_PAD (bsrc), NULL);
+	GST_DEBUG_OBJECT (bsrc, "caps of src: %" GST_PTR_FORMAT, thiscaps);
+	
+	if (thiscaps == NULL || gst_caps_is_any (thiscaps))
+		goto no_nego_needed;
+	
+	peercaps = gst_pad_peer_query_caps (GST_BASE_SRC_PAD (bsrc), NULL);
+	GST_DEBUG_OBJECT (bsrc, "caps of peer: %" GST_PTR_FORMAT, peercaps);
+	
+	if (peercaps && !gst_caps_is_any (peercaps)) {
+		GstCaps *icaps = NULL;
+		int i;
+		
+		/* Prefer the first caps we are compatible with that the peer proposed */
+		for (i = 0; i < gst_caps_get_size (peercaps); i++) {
+			/* get intersection */
+			GstCaps *ipcaps = gst_caps_copy_nth (peercaps, i);
+			
+			GST_DEBUG_OBJECT (bsrc, "peer: %" GST_PTR_FORMAT, ipcaps);
+			
+			icaps = gst_caps_intersect (thiscaps, ipcaps);
+			gst_caps_unref (ipcaps);
+			
+			if (!gst_caps_is_empty (icaps))
+				break;
+			
+			gst_caps_unref (icaps);
+			icaps = NULL;
+		}
+		
+		GST_DEBUG_OBJECT (bsrc, "intersect: %" GST_PTR_FORMAT, icaps);
+		if (icaps) {
+			/* If there are multiple intersections pick the one with the smallest
+			 * resolution strictly bigger then the first peer caps */
+			if (gst_caps_get_size (icaps) > 1) {
+				GstStructure *s = gst_caps_get_structure (peercaps, 0);
+				int best = 0;
+				int twidth, theight;
+				int width = G_MAXINT, height = G_MAXINT;
+				
+				if (gst_structure_get_int (s, "width", &twidth) && gst_structure_get_int (s, "height", &theight)) {
+					
+						/* Walk the structure backwards to get the first entry of the
+						* smallest resolution bigger (or equal to) the preferred resolution)
+						*/
+						for (i = gst_caps_get_size (icaps) - 1; i >= 0; i--) {
+							GstStructure *is = gst_caps_get_structure (icaps, i);
+							int w, h;
+							
+							if (gst_structure_get_int (is, "width", &w) && gst_structure_get_int (is, "height", &h))
+							{
+								if (w >= twidth && w <= width && h >= theight && h <= height) {
+									width = w;
+									height = h;
+									best = i;
+								}
+							}
+						}
+					}
+					
+					caps = gst_caps_copy_nth (icaps, best);
+					gst_caps_unref (icaps);
+			} else {
+				caps = icaps;
+			}
+		}
+		gst_caps_unref (thiscaps);
+	} else {
+		/* no peer or peer have ANY caps, work with our own caps then */
+		caps = thiscaps;
+	}
+	if (peercaps)
+		gst_caps_unref (peercaps);
+	if (caps) {
+		caps = gst_caps_truncate (caps);
+		
+		/* now fixate */
+		if (!gst_caps_is_empty (caps)) {
+			caps = gst_dreamvideosource_fixate (bsrc, caps);
+			GST_DEBUG_OBJECT (bsrc, "fixated to: %" GST_PTR_FORMAT, caps);
+			
+			if (gst_caps_is_any (caps)) {
+				/* hmm, still anything, so element can do anything and
+				 * nego is not needed */
+				result = TRUE;
+			} else if (gst_caps_is_fixed (caps)) {
+				/* yay, fixed caps, use those then */
+				result = gst_base_src_set_caps (bsrc, caps);
+			}
+		}
+		gst_caps_unref (caps);
+	}
+	return result;
+	
+	no_nego_needed:
+	{
+		GST_DEBUG_OBJECT (bsrc, "no negotiation needed");
+		if (thiscaps)
+			gst_caps_unref (thiscaps);
+		return TRUE;
+	}
 }
 
 static void
