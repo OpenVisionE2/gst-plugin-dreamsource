@@ -35,6 +35,7 @@ enum
 enum
 {
   ARG_0,
+  ARG_CAPS,
   ARG_BITRATE,
 };
 
@@ -42,15 +43,17 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 
 
 #define DEFAULT_BITRATE 2048
+#define DEFAULT_FRAMERATE 25
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
 	GST_PAD_SRC,
 	GST_PAD_ALWAYS,
 	GST_STATIC_CAPS	("video/x-h264, "
-	"width = " GST_VIDEO_SIZE_RANGE ", "
-	"height = " GST_VIDEO_SIZE_RANGE ", "
-	"framerate = " GST_VIDEO_FPS_RANGE ", "
+	"width = { 720, 1280, 1920 }, "
+	"height = { 576, 720, 1080 }, "
+	"framerate = { 1/25, 1/30, 1/50, 1/60 }, "
+	"pixel-aspect-ratio = { 5/4, 16/9 }, "
 	"stream-format = (string) byte-stream, "
 	"profile = (string) main")
     );
@@ -59,6 +62,8 @@ static GstStaticPadTemplate srctemplate =
 G_DEFINE_TYPE (GstDreamVideoSource, gst_dreamvideosource, GST_TYPE_PUSH_SRC);
 
 static GstCaps *gst_dreamvideosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
+static gboolean gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps);
+static GstCaps *gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps);
 static gboolean gst_dreamvideosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_stop (GstBaseSrc * bsrc);
 static void gst_dreamvideosource_finalize (GObject * gobject);
@@ -67,6 +72,7 @@ static GstFlowReturn gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer *
 static void gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec);
 static void gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * value, GParamSpec * pspec);
 
+static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition);
 static gint64 gst_dreamvideosource_get_base_pts (GstDreamVideoSource *self);
 
 static void
@@ -93,6 +99,8 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	    "Dream Video source", "Source/Video",
 	    "Provide an h.264 video elementary stream from Dreambox encoder device",
 	    "Andreas Frisch <fraxinas@opendreambox.org>");
+	
+	gstelement_class->change_state = gst_dreamvideosource_change_state;
 
 	gstbasesrc_class->get_caps = gst_dreamvideosource_getcaps;
 	gstbasesrc_class->start = gst_dreamvideosource_start;
@@ -105,7 +113,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	    "Bitrate in kbit/sec", 16, 200000, DEFAULT_BITRATE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-	   gst_dreamvideosource_signals[SIGNAL_GET_BASE_PTS] =
+	gst_dreamvideosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
 		G_TYPE_FROM_CLASS (klass),
 		G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
@@ -152,15 +160,18 @@ static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32
 {
 	if (!self->encoder || !self->encoder->fd)
 		return;
+	g_mutex_lock (&self->mutex);
 	uint32_t vbr = bitrate*1000;		
 	int ret = ioctl(self->encoder->fd, VENC_SET_BITRATE, &vbr);
 	if (ret != 0)
 	{
 		GST_WARNING_OBJECT (self, "can't set video bitrate to %i bytes/s!", vbr);
+		g_mutex_unlock (&self->mutex);
 		return;
 	}
 	GST_INFO_OBJECT (self, "set video bitrate to %i kBytes/s", bitrate);
 	self->video_info.bitrate = vbr;
+	g_mutex_unlock (&self->mutex);
 }
 
 static void
@@ -335,6 +346,41 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 	return GST_FLOW_ERROR;
 }
 
+static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition)
+{
+	g_return_val_if_fail (GST_DREAMVIDEOSOURCE (element), FALSE);
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (element);
+	int ret;
+
+	switch (transition) {
+		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
+			ret = ioctl(self->encoder->fd, VENC_START);
+			if ( ret != 0 )
+			{
+				GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
+				return GST_STATE_CHANGE_FAILURE;
+			}
+			GST_INFO_OBJECT (self, "started encoder!");
+			break;
+		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED");
+			ret = ioctl(self->encoder->fd, VENC_STOP);
+			if ( ret != 0 )
+			{
+				GST_ERROR_OBJECT(self,"can't stop encoder ioctl!");
+				return GST_STATE_CHANGE_FAILURE;
+			}
+			break;
+		default:
+			break;
+	}
+
+	if (GST_ELEMENT_CLASS (parent_class)->change_state)
+		return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+
+	return GST_STATE_CHANGE_SUCCESS;
+}
 static gboolean
 gst_dreamvideosource_start (GstBaseSrc * bsrc)
 {
@@ -377,14 +423,6 @@ gst_dreamvideosource_start (GstBaseSrc * bsrc)
 
 	gst_dreamvideosource_set_bitrate(self, DEFAULT_BITRATE);
 
-	int ret = ioctl(self->encoder->fd, VENC_START);
-	if ( ret != 0 )
-	{
-		GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
-		return FALSE;
-	}
-	GST_INFO_OBJECT (self, "started encoder!");
-	
 	self->dreamaudiosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamaudiosource0");
 
 	return TRUE;
