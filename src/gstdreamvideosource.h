@@ -103,6 +103,7 @@ struct _GstDreamVideoSource
 	EncoderInfo *encoder;
 
 	VideoFormatInfo video_info;
+	GstCaps *property_caps;
 
 	unsigned int descriptors_available;
 	unsigned int descriptors_count;

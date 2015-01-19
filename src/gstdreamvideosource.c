@@ -52,7 +52,7 @@ static GstStaticPadTemplate srctemplate =
 	GST_STATIC_CAPS	("video/x-h264, "
 	"width = { 720, 1280, 1920 }, "
 	"height = { 576, 720, 1080 }, "
-	"framerate = { 1/25, 1/30, 1/50, 1/60 }, "
+	"framerate = { 25/1, 30/1, 50/1, 60/1 }, "
 	"pixel-aspect-ratio = { 5/4, 16/9 }, "
 	"stream-format = (string) byte-stream, "
 	"profile = (string) main")
@@ -64,7 +64,6 @@ G_DEFINE_TYPE (GstDreamVideoSource, gst_dreamvideosource, GST_TYPE_PUSH_SRC);
 static GstCaps *gst_dreamvideosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
 static gboolean gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps);
 static GstCaps *gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps);
-static gboolean gst_dreamvideosource_negotiate (GstBaseSrc * bsrc);
 
 static gboolean gst_dreamvideosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_stop (GstBaseSrc * bsrc);
@@ -107,7 +106,6 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	gstbsrc_class->get_caps = gst_dreamvideosource_getcaps;
  	gstbsrc_class->set_caps = gst_dreamvideosource_setcaps;
  	gstbsrc_class->fixate = gst_dreamvideosource_fixate;
-// 	gstbsrc_class->negotiate = gst_dreamvideosource_negotiate;
 	gstbsrc_class->start = gst_dreamvideosource_start;
 	gstbsrc_class->stop = gst_dreamvideosource_stop;
 
@@ -150,6 +148,8 @@ gst_dreamvideosource_plugin_init (GstPlugin *plugin)
 static void
 gst_dreamvideosource_init (GstDreamVideoSource * self)
 {
+	GstPadTemplate *pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
+	self->property_caps = gst_pad_template_get_caps (pad_template);
 	self->encoder = NULL;
 	self->descriptors_available = 0;
 	self->video_info.width = 1280;
@@ -189,15 +189,6 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 	if (!self->encoder || !self->encoder->fd)
 	{
 		GST_ERROR_OBJECT (self, "can't set format because encoder device not opened!");
-		return FALSE;
-	}
-	
-	GstState state;
-	gst_element_get_state (GST_ELEMENT(self), &state, NULL, 1*GST_MSECOND);
-	
-	if (state != GST_STATE_PAUSED)
-	{
-		GST_ERROR_OBJECT (self, "can't set format in %s state. must be in PAUSED!", gst_element_state_get_name (state));
 		return FALSE;
 	}
 	
@@ -277,9 +268,9 @@ gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue
 	switch (prop_id) {
 		case ARG_CAPS:
 		{
-			GstCaps *caps = gst_caps_copy(gst_value_get_caps (value));
-			gst_dreamvideosource_setcaps (GST_BASE_SRC(object), caps);
-			gst_caps_unref(caps);
+			if (self->property_caps)
+				gst_caps_unref (self->property_caps);
+			self->property_caps = gst_caps_copy (gst_value_get_caps (value));
 			break;
 		}
 		case ARG_BITRATE:
@@ -313,25 +304,13 @@ static GstCaps *
 gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	GstPadTemplate *pad_template;
 	GstCaps *caps;
+	g_return_val_if_fail (self->property_caps != NULL, NULL);
 
-	pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
-	g_return_val_if_fail (pad_template != NULL, NULL);
-	
-	GST_LOG_OBJECT (self, "gst_dreamvideosource_getcaps filter %" GST_PTR_FORMAT, caps);
-	
-	caps = gst_pad_template_get_caps (pad_template);
-	
-	if (self->encoder && self->video_info.width && self->video_info.height & self->video_info.fps_n)
-	{
-		caps = gst_caps_make_writable(gst_pad_template_get_caps (pad_template));
-		gst_caps_set_simple(caps, "width", G_TYPE_INT, self->video_info.width, NULL);
-		gst_caps_set_simple(caps, "height", G_TYPE_INT, self->video_info.height, NULL);
-		gst_caps_set_simple(caps, "framerate", GST_TYPE_FRACTION, self->video_info.fps_n, self->video_info.fps_d, NULL);
-		gst_caps_set_simple(caps, "pixel-aspect-ratio", GST_TYPE_FRACTION, self->video_info.par_n, self->video_info.par_d, NULL);
-	}
-	
+	caps = gst_caps_copy(self->property_caps);
+
+	GST_LOG_OBJECT (self, "gst_dreamvideosource_getcaps property_caps %" GST_PTR_FORMAT " filter %" GST_PTR_FORMAT, caps, filter);
+
 	if (filter) {
 		GstCaps *intersection;
 		intersection = gst_caps_intersect_full (filter, caps, GST_CAPS_INTERSECT_FIRST);
@@ -361,7 +340,14 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 		GST_DEBUG_OBJECT (self, "New caps equal to old ones: %" GST_PTR_FORMAT, caps);
 		ret = TRUE;
 	} else {
-		if (gst_structure_has_name (structure, "video/x-h264"))
+		GstState state;
+		gst_element_get_state (GST_ELEMENT(self), &state, NULL, 1*GST_MSECOND);
+		if (state == GST_STATE_PLAYING)
+		{
+			GST_WARNING_OBJECT (self, "can't change caps while in RUNNING state %" GST_PTR_FORMAT, caps);
+			return FALSE;
+		}
+		else if (gst_structure_has_name (structure, "video/x-h264"))
 		{
 			memset (&info, 0, sizeof(VideoFormatInfo));
 			ret = gst_structure_get_int (structure, "width", &info.width);
@@ -385,6 +371,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 				info.par_d = 9;
 			}
 			GST_INFO_OBJECT (self, "set caps %" GST_PTR_FORMAT, caps);
+
 			if (gst_dreamvideosource_set_format(self, &info))
 				ret = gst_pad_push_event (bsrc->srcpad, gst_event_new_caps (caps));
 		}
@@ -418,125 +405,6 @@ gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 	caps = GST_BASE_SRC_CLASS (parent_class)->fixate (bsrc, caps);
 	GST_DEBUG_OBJECT (bsrc, "fixate caps: %" GST_PTR_FORMAT, caps);
 	return caps;
-}
-
-static gboolean
-gst_dreamvideosource_negotiate (GstBaseSrc * bsrc)
-{
-	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-
-	GstState state;
-	GstCaps *thiscaps;
-	GstCaps *caps = NULL;
-	GstCaps *peercaps = NULL;
-	gboolean result = FALSE;
-	
-	gst_element_get_state (GST_ELEMENT(self), &state, NULL, 1*GST_MSECOND);
-	
-	if (state == GST_STATE_PLAYING)
-		return TRUE;
-
-	thiscaps = gst_pad_query_caps (GST_BASE_SRC_PAD (bsrc), NULL);
-	GST_DEBUG_OBJECT (bsrc, "caps of src: %" GST_PTR_FORMAT, thiscaps);
-	
-	if (thiscaps == NULL || gst_caps_is_any (thiscaps))
-		goto no_nego_needed;
-	
-	peercaps = gst_pad_peer_query_caps (GST_BASE_SRC_PAD (bsrc), NULL);
-	GST_DEBUG_OBJECT (bsrc, "caps of peer: %" GST_PTR_FORMAT, peercaps);
-	
-	if (peercaps && !gst_caps_is_any (peercaps)) {
-		GstCaps *icaps = NULL;
-		int i;
-		
-		/* Prefer the first caps we are compatible with that the peer proposed */
-		for (i = 0; i < gst_caps_get_size (peercaps); i++) {
-			/* get intersection */
-			GstCaps *ipcaps = gst_caps_copy_nth (peercaps, i);
-			
-			GST_DEBUG_OBJECT (bsrc, "peer: %" GST_PTR_FORMAT, ipcaps);
-			
-			icaps = gst_caps_intersect (thiscaps, ipcaps);
-			gst_caps_unref (ipcaps);
-			
-			if (!gst_caps_is_empty (icaps))
-				break;
-			
-			gst_caps_unref (icaps);
-			icaps = NULL;
-		}
-		
-		GST_DEBUG_OBJECT (bsrc, "intersect: %" GST_PTR_FORMAT, icaps);
-		if (icaps) {
-			/* If there are multiple intersections pick the one with the smallest
-			 * resolution strictly bigger then the first peer caps */
-			if (gst_caps_get_size (icaps) > 1) {
-				GstStructure *s = gst_caps_get_structure (peercaps, 0);
-				int best = 0;
-				int twidth, theight;
-				int width = G_MAXINT, height = G_MAXINT;
-				
-				if (gst_structure_get_int (s, "width", &twidth) && gst_structure_get_int (s, "height", &theight)) {
-					
-						/* Walk the structure backwards to get the first entry of the
-						* smallest resolution bigger (or equal to) the preferred resolution)
-						*/
-						for (i = gst_caps_get_size (icaps) - 1; i >= 0; i--) {
-							GstStructure *is = gst_caps_get_structure (icaps, i);
-							int w, h;
-							
-							if (gst_structure_get_int (is, "width", &w) && gst_structure_get_int (is, "height", &h))
-							{
-								if (w >= twidth && w <= width && h >= theight && h <= height) {
-									width = w;
-									height = h;
-									best = i;
-								}
-							}
-						}
-					}
-					
-					caps = gst_caps_copy_nth (icaps, best);
-					gst_caps_unref (icaps);
-			} else {
-				caps = icaps;
-			}
-		}
-		gst_caps_unref (thiscaps);
-	} else {
-		/* no peer or peer have ANY caps, work with our own caps then */
-		caps = thiscaps;
-	}
-	if (peercaps)
-		gst_caps_unref (peercaps);
-	if (caps) {
-		caps = gst_caps_truncate (caps);
-		
-		/* now fixate */
-		if (!gst_caps_is_empty (caps)) {
-			caps = gst_dreamvideosource_fixate (bsrc, caps);
-			GST_DEBUG_OBJECT (bsrc, "fixated to: %" GST_PTR_FORMAT, caps);
-			
-			if (gst_caps_is_any (caps)) {
-				/* hmm, still anything, so element can do anything and
-				 * nego is not needed */
-				result = TRUE;
-			} else if (gst_caps_is_fixed (caps)) {
-				/* yay, fixed caps, use those then */
-				result = gst_base_src_set_caps (bsrc, caps);
-			}
-		}
-		gst_caps_unref (caps);
-	}
-	return result;
-	
-	no_nego_needed:
-	{
-		GST_DEBUG_OBJECT (bsrc, "no negotiation needed");
-		if (thiscaps)
-			gst_caps_unref (thiscaps);
-		return TRUE;
-	}
 }
 
 static void
@@ -764,6 +632,8 @@ gst_dreamvideosource_finalize (GObject * gobject)
 			munmap(self->encoder->cdb, VMMAPSIZE);
 		free(self->encoder);
 	}
+	if (self->property_caps)
+		gst_caps_unref(self->property_caps);
 	g_mutex_clear (&self->mutex);
 	GST_DEBUG_OBJECT (self, "finalized");
 	G_OBJECT_CLASS (parent_class)->finalize (gobject);
