@@ -44,6 +44,8 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 
 #define DEFAULT_BITRATE 2048
 #define DEFAULT_FRAMERATE 25
+#define DEFAULT_WIDTH 1280
+#define DEFAULT_HEIGHT 720
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -149,15 +151,10 @@ static void
 gst_dreamvideosource_init (GstDreamVideoSource * self)
 {
 	GstPadTemplate *pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
-	self->property_caps = gst_pad_template_get_caps (pad_template);
+	self->current_caps = gst_pad_template_get_caps (pad_template);
+
 	self->encoder = NULL;
 	self->descriptors_available = 0;
-	self->video_info.width = 1280;
-	self->video_info.height = 720;
-	self->video_info.par_n = 16;
-	self->video_info.par_d = 9;
-	self->video_info.fps_n = 25;
-	self->video_info.fps_d = 1;
 	self->base_pts = GST_CLOCK_TIME_NONE;
 
 	g_mutex_init (&self->mutex);
@@ -268,9 +265,9 @@ gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue
 	switch (prop_id) {
 		case ARG_CAPS:
 		{
-			if (self->property_caps)
-				gst_caps_unref (self->property_caps);
-			self->property_caps = gst_caps_copy (gst_value_get_caps (value));
+			GstCaps *caps = gst_caps_copy (gst_value_get_caps (value));
+			gst_dreamvideosource_setcaps(GST_BASE_SRC(object), caps);
+			gst_caps_unref (caps);
 			break;
 		}
 		case ARG_BITRATE:
@@ -304,12 +301,9 @@ static GstCaps *
 gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	GstCaps *caps;
-	g_return_val_if_fail (self->property_caps != NULL, NULL);
+	GstCaps *caps = gst_caps_copy(self->current_caps);
 
-	caps = gst_caps_copy(self->property_caps);
-
-	GST_LOG_OBJECT (self, "gst_dreamvideosource_getcaps property_caps %" GST_PTR_FORMAT " filter %" GST_PTR_FORMAT, caps, filter);
+	GST_LOG_OBJECT (self, "gst_dreamvideosource_getcaps %" GST_PTR_FORMAT " filter %" GST_PTR_FORMAT, caps, filter);
 
 	if (filter) {
 		GstCaps *intersection;
@@ -371,6 +365,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 				info.par_d = 9;
 			}
 			GST_INFO_OBJECT (self, "set caps %" GST_PTR_FORMAT, caps);
+			gst_caps_replace (&self->current_caps, caps);
 
 			if (gst_dreamvideosource_set_format(self, &info))
 				ret = gst_pad_push_event (bsrc->srcpad, gst_event_new_caps (caps));
@@ -388,19 +383,22 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 static GstCaps *
 gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 {
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
 	GstStructure *structure;
+	GValue aspect = {0,};
+	g_value_init (&aspect, GST_TYPE_FRACTION);
 
 	caps = gst_caps_make_writable (caps);
 	structure = gst_caps_get_structure (caps, 0);
 
-	gst_structure_fixate_field_nearest_int (structure, "width", 1280);
-	gst_structure_fixate_field_nearest_int (structure, "height", 720);
+	gst_structure_fixate_field_nearest_int (structure, "width", DEFAULT_WIDTH);
+	gst_structure_fixate_field_nearest_int (structure, "height", DEFAULT_HEIGHT);
 	gst_structure_fixate_field_nearest_fraction (structure, "framerate", DEFAULT_FRAMERATE, 1);
 
-	if (gst_structure_has_field (structure, "pixel-aspect-ratio"))
-		gst_structure_fixate_field_nearest_fraction (structure, "pixel-aspect-ratio", 16, 9);
-	else
-		gst_structure_set (structure, "pixel-aspect-ratio", GST_TYPE_FRACTION, 16, 9, NULL);
+	gst_value_set_fraction(&aspect, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+	int par_n = gst_value_get_fraction_numerator(&aspect);
+	int par_d = gst_value_get_fraction_denominator(&aspect);
+	gst_structure_set (structure, "pixel-aspect-ratio", GST_TYPE_FRACTION, par_n, par_d, NULL);
 
 	caps = GST_BASE_SRC_CLASS (parent_class)->fixate (bsrc, caps);
 	GST_DEBUG_OBJECT (bsrc, "fixate caps: %" GST_PTR_FORMAT, caps);
@@ -632,8 +630,8 @@ gst_dreamvideosource_finalize (GObject * gobject)
 			munmap(self->encoder->cdb, VMMAPSIZE);
 		free(self->encoder);
 	}
-	if (self->property_caps)
-		gst_caps_unref(self->property_caps);
+	if (self->current_caps)
+		gst_caps_unref(self->current_caps);
 	g_mutex_clear (&self->mutex);
 	GST_DEBUG_OBJECT (self, "finalized");
 	G_OBJECT_CLASS (parent_class)->finalize (gobject);
