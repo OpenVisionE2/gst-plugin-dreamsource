@@ -167,13 +167,11 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 	}
 	
 	GST_OBJECT_LOCK (self);
-// 	g_mutex_lock (&self->mutex);
+	GST_INFO_OBJECT (self, "requested to set resolution to %dx%d, framerate to %d/%d", info->width, info->height, info->fps_n, info->fps_d);
 
-	GST_INFO_OBJECT (self, "requested to set resolution to %dx%d, framerate to %d/%d aspect_ratio %d/%d", info->width, info->height, info->fps_n, info->fps_d, info->par_n, info->par_d);
-	
-	if ( (info->par_n == 5 && info->par_d == 4) || (info->par_n == 16 && info->par_d == 9) )
+	if (info->fps_n > 0)
 	{
-		int venc_size = 0, venc_fps = 0;
+		int venc_fps = 0;
 		switch (info->fps_n) {
 			case 25:
 				venc_fps = rate_25;
@@ -191,7 +189,18 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 				GST_ERROR_OBJECT (self, "invalid framerate %d/%d", info->fps_n, info->fps_d);
 				goto fail;
 		}
-		
+		if (!ioctl(self->encoder->fd, VENC_SET_FRAMERATE, &venc_fps))
+			GST_INFO_OBJECT (self, "set framerate to %d/%d -> ioctrl(%d, VENC_SET_FRAMERATE, &%d)", info->fps_n, info->fps_d, self->encoder->fd, venc_fps);
+		else
+		{
+			GST_WARNING_OBJECT (self, "can't set framerate to %d/%d -> ioctrl(%d, VENC_SET_FRAMERATE, &%d)", info->fps_n, info->fps_d, self->encoder->fd, venc_fps);
+			goto fail;
+		}
+	}
+
+	if (info->width && info->height)
+	{
+		int venc_size = 0;
 		if ( info->width == 720 && info->height == 576 )
 			venc_size = fmt_720x576;
 		else if ( info->width == 1280 && info->height == 720)
@@ -203,15 +212,6 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 			GST_ERROR_OBJECT (self, "invalid resolution %dx%d", info->width, info->height);
 			goto fail;
 		}
-			
-		if (!ioctl(self->encoder->fd, VENC_SET_FRAMERATE, &venc_fps))
-			GST_INFO_OBJECT (self, "set framerate to %d/%d -> ioctrl(%d, VENC_SET_FRAMERATE, &%d)", info->fps_n, info->fps_d, self->encoder->fd, venc_fps);
-		else
-		{
-			GST_WARNING_OBJECT (self, "can't set framerate to %d/%d -> ioctrl(%d, VENC_SET_FRAMERATE, &%d)", info->fps_n, info->fps_d, self->encoder->fd, venc_fps);
-			goto fail;
-		}
-
 		if (!ioctl(self->encoder->fd, VENC_SET_RESOLUTION, &venc_size))
 			GST_INFO_OBJECT (self, "set resolution to %dx%d -> ioctrl(%d, VENC_SET_RESOLUTION, &%d)", info->width, info->height, self->encoder->fd, venc_size);
 		else
@@ -219,14 +219,11 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 			GST_WARNING_OBJECT (self, "can't set resolution to %dx%d -> ioctrl(%d, VENC_SET_RESOLUTION, &%d)", info->width, info->height, self->encoder->fd, venc_size);
 			goto fail;
 		}
-		
-		self->video_info = *info;
-// 		g_mutex_unlock (&self->mutex);
-		GST_OBJECT_UNLOCK (self);
-		return TRUE;
 	}
 	
-	GST_INFO_OBJECT (self, "invalid aspect!");
+	self->video_info = *info;
+	GST_OBJECT_UNLOCK (self);
+	return TRUE;
 	
 fail:
 // 	g_mutex_unlock (&self->mutex);
@@ -384,27 +381,14 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 			ret = gst_structure_get_int (structure, "width", &info.width);
 			ret &= gst_structure_get_int (structure, "height", &info.height);
 			framerate = gst_structure_get_value (structure, "framerate");
-			if (framerate) {
+			if (GST_VALUE_HOLDS_FRACTION(framerate)) {
 				info.fps_n = gst_value_get_fraction_numerator (framerate);
 				info.fps_d = gst_value_get_fraction_denominator (framerate);
-			}
-			else {
-				info.fps_n = DEFAULT_FRAMERATE;
-				info.fps_d = 1;
-			}
-			par = gst_structure_get_value (structure, "pixel-aspect-ratio");
-			if (par) {
-				info.par_n = gst_value_get_fraction_numerator (par);
-				info.par_d = gst_value_get_fraction_denominator (par);
-			}
-			else {
-				info.par_n = 16;
-				info.par_d = 9;
 			}
 			GST_INFO_OBJECT (self, "set caps %" GST_PTR_FORMAT, caps);
 			gst_caps_replace (&self->current_caps, caps);
 
-			if (gst_dreamvideosource_set_format(self, &info))
+			if (gst_dreamvideosource_set_format(self, &info) && gst_caps_is_fixed(caps))
 				ret = gst_pad_push_event (bsrc->srcpad, gst_event_new_caps (caps));
 		}
 		else {
@@ -422,8 +406,6 @@ gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
 	GstStructure *structure;
-	GValue aspect = {0,};
-	g_value_init (&aspect, GST_TYPE_FRACTION);
 
 	caps = gst_caps_make_writable (caps);
 	structure = gst_caps_get_structure (caps, 0);
@@ -431,11 +413,7 @@ gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 	gst_structure_fixate_field_nearest_int (structure, "width", DEFAULT_WIDTH);
 	gst_structure_fixate_field_nearest_int (structure, "height", DEFAULT_HEIGHT);
 	gst_structure_fixate_field_nearest_fraction (structure, "framerate", DEFAULT_FRAMERATE, 1);
-
-	gst_value_set_fraction(&aspect, DEFAULT_WIDTH, DEFAULT_HEIGHT);
-	int par_n = gst_value_get_fraction_numerator(&aspect);
-	int par_d = gst_value_get_fraction_denominator(&aspect);
-	gst_structure_set (structure, "pixel-aspect-ratio", GST_TYPE_FRACTION, par_n, par_d, NULL);
+	gst_structure_fixate_field_nearest_fraction (structure, "pixel-aspect-ratio", DEFAULT_WIDTH, DEFAULT_HEIGHT);
 
 	caps = GST_BASE_SRC_CLASS (parent_class)->fixate (bsrc, caps);
 	GST_DEBUG_OBJECT (bsrc, "fixate caps: %" GST_PTR_FORMAT, caps);

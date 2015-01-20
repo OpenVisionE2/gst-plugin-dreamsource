@@ -65,8 +65,6 @@ struct _VideoFormatInfo {
 	gint width;
 	gint height;
 
-	gint par_n;	/* pixel-aspect-ratio numerator */
-	gint par_d;	/* pixel-aspect-ratio demnominator */
 	gint fps_n;	/* framerate numerator */
 	gint fps_d;	/* framerate demnominator */
 
