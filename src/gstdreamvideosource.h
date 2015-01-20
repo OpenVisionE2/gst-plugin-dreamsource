@@ -107,10 +107,10 @@ struct _GstDreamVideoSource
 	unsigned int descriptors_count;
 
 	int dumpfd;
-	
+
 	GstElement *dreamaudiosrc;
 	GstClockTime base_pts;
-	
+
 	GMutex mutex;
 };
 

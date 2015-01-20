@@ -102,7 +102,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	    "Dream Video source", "Source/Video",
 	    "Provide an h.264 video elementary stream from Dreambox encoder device",
 	    "Andreas Frisch <fraxinas@opendreambox.org>");
-	
+
 	gstelement_class->change_state = gst_dreamvideosource_change_state;
 
 	gstbsrc_class->get_caps = gst_dreamvideosource_getcaps;
@@ -112,7 +112,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	gstbsrc_class->stop = gst_dreamvideosource_stop;
 
 	gstpush_src_class->create = gst_dreamvideosource_create;
-	
+
 	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BITRATE,
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
 	    "Bitrate in kbit/sec", 16, 200000, DEFAULT_BITRATE,
@@ -145,7 +145,7 @@ static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32
 	if (!self->encoder || !self->encoder->fd)
 		return;
 	g_mutex_lock (&self->mutex);
-	uint32_t vbr = bitrate*1000;		
+	uint32_t vbr = bitrate*1000;
 	int ret = ioctl(self->encoder->fd, VENC_SET_BITRATE, &vbr);
 	if (ret != 0)
 	{
@@ -165,9 +165,8 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 		GST_ERROR_OBJECT (self, "can't set format because encoder device not opened!");
 		return FALSE;
 	}
-	
+
 	GST_OBJECT_LOCK (self);
-	GST_INFO_OBJECT (self, "requested to set resolution to %dx%d, framerate to %d/%d", info->width, info->height, info->fps_n, info->fps_d);
 
 	if (info->fps_n > 0)
 	{
@@ -220,13 +219,12 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 			goto fail;
 		}
 	}
-	
+
 	self->video_info = *info;
 	GST_OBJECT_UNLOCK (self);
 	return TRUE;
-	
+
 fail:
-// 	g_mutex_unlock (&self->mutex);
 	GST_OBJECT_UNLOCK (self);
 	return FALSE;
 }
@@ -295,7 +293,7 @@ static void
 gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (object);
-	
+
 	switch (prop_id) {
 		case ARG_CAPS:
 		{
@@ -317,7 +315,7 @@ static void
 gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * value, GParamSpec * pspec)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (object);
-	
+
 	switch (prop_id) {
 		case ARG_CAPS:
 			g_value_take_boxed (value, gst_dreamvideosource_getcaps (GST_BASE_SRC(object), GST_CAPS_ANY));
@@ -344,9 +342,9 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 		intersection = gst_caps_intersect_full (filter, caps, GST_CAPS_INTERSECT_FIRST);
 		gst_caps_unref (caps);
 		caps = intersection;
-	}	
+	}
 
-	GST_INFO_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
+	GST_DEBUG_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
 	return caps;
 }
 
@@ -362,7 +360,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 	int width, height;
 	const GValue *framerate, *par;
 	structure = gst_caps_get_structure (caps, 0);
-	
+
 	current_caps = gst_pad_get_current_caps (GST_BASE_SRC_PAD (bsrc));
 	if (current_caps && gst_caps_is_equal (current_caps, caps)) {
 		GST_DEBUG_OBJECT (self, "New caps equal to old ones: %" GST_PTR_FORMAT, caps);
@@ -431,18 +429,18 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (psrc);
 	EncoderInfo *enc = self->encoder;
-	
+
 	GST_LOG_OBJECT (self, "new buffer requested");
 
 	if (!enc) {
 		GST_WARNING_OBJECT (self, "encoder device not opened!");
 		return GST_FLOW_ERROR;
 	}
-	
+
 	while (1)
 	{
 		*outbuf = NULL;
-		
+
 		if (self->descriptors_available == 0)
 		{
 			self->descriptors_count = 0;
@@ -466,12 +464,12 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 			GST_LOG_OBJECT (self, "descriptors_count=%d, descriptors_available=%d\tuiOffset=%d, uiLength=%d", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
 
 			if (G_UNLIKELY (f & CDB_FLAG_METADATA))
-			{ 
+			{
 				GST_LOG_OBJECT (self, "CDB_FLAG_METADATA... skip outdated packet");
 				self->descriptors_count = self->descriptors_available;
 				continue;
 			}
-			
+
 			if (f & VBD_FLAG_DTS_VALID && desc->uiDTS)
 			{
 				if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
@@ -495,9 +493,9 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					}
 				}
 			}
-			
+
 			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, VMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, (GDestroyNotify)gst_dreamvideosource_free_buffer);
-			
+
 			if (f & CDB_FLAG_PTS_VALID)
 			{
 				GstClockTime buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
@@ -527,7 +525,7 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 			}
 			self->descriptors_available = 0;
 		}
-		
+
 		if (*outbuf)
 		{
 			GST_DEBUG_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
@@ -600,7 +598,7 @@ gst_dreamvideosource_finalize (GObject * gobject)
 	if (self->encoder) {
 		if (self->encoder->buffer)
 			free(self->encoder->buffer);
-		if (self->encoder->cdb) 
+		if (self->encoder->cdb)
 			munmap(self->encoder->cdb, VMMAPSIZE);
 		free(self->encoder);
 	}

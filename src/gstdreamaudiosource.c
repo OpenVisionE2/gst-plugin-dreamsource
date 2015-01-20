@@ -102,7 +102,7 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
 	    "Bitrate in kbit/sec", 16, 320, DEFAULT_BITRATE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-	
+
 	gst_dreamaudiosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
 		G_TYPE_FROM_CLASS (klass),
@@ -149,7 +149,7 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 	self->encoder = NULL;
 	self->descriptors_available = 0;
 	g_mutex_init (&self->mutex);
-	
+
 	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
 	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
 
@@ -194,7 +194,7 @@ static void
 gst_dreamaudiosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (object);
-	
+
 	switch (prop_id) {
 		case ARG_BITRATE:
 			gst_dreamaudiosource_set_bitrate(self, g_value_get_int (value));
@@ -209,7 +209,7 @@ static void
 gst_dreamaudiosource_get_property (GObject * object, guint prop_id, GValue * value, GParamSpec * pspec)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (object);
-	
+
 	switch (prop_id) {
 		case ARG_BITRATE:
 			g_value_set_int (value, self->audio_info.bitrate/1000);
@@ -239,7 +239,7 @@ gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 		caps = gst_caps_make_writable(gst_pad_template_get_caps (pad_template));
 	}
 
-	GST_INFO_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
+	GST_DEBUG_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
 	return caps;
 }
 
@@ -263,11 +263,10 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 		return GST_FLOW_ERROR;
 	}
 
-	
 	while (1)
 	{
 		*outbuf = NULL;
-		
+
 		if (self->descriptors_available == 0)
 		{
 			self->descriptors_count = 0;
@@ -290,14 +289,14 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 			GST_LOG_OBJECT (self, "descriptors_count=%d, descriptors_available=%u\tuiOffset=%u, uiLength=%"G_GSIZE_FORMAT"", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
 
-			if (f & CDB_FLAG_METADATA) { 
+			if (f & CDB_FLAG_METADATA) {
 				GST_LOG_OBJECT (self, "CDB_FLAG_METADATA... skip outdated packet");
 				self->descriptors_count = self->descriptors_available;
 				continue;
 			}
-			
+
 			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, (GDestroyNotify)gst_dreamaudiosource_free_buffer);
-			
+
 			if (f & CDB_FLAG_PTS_VALID)
 			{
 				if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
@@ -327,9 +326,8 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					GST_BUFFER_PTS(*outbuf) = buffer_time;
 					GST_BUFFER_DTS(*outbuf) = buffer_time;
 				}
-				
 			}
-			
+
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
 			dumpoffset += wret;
@@ -423,7 +421,7 @@ gst_dreamaudiosource_finalize (GObject * gobject)
 	if (self->encoder) {
 		if (self->encoder->buffer)
 			free(self->encoder->buffer);
-		if (self->encoder->cdb) 
+		if (self->encoder->cdb)
 			munmap(self->encoder->cdb, AMMAPSIZE);
 		free(self->encoder);
 	}
