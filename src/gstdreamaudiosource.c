@@ -61,6 +61,8 @@ static GstFlowReturn gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer *
 
 static void gst_dreamaudiosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec);
 static void gst_dreamaudiosource_get_property (GObject * object, guint prop_id, GValue * value, GParamSpec * pspec);
+
+static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * element, GstStateChange transition);
 static gint64 gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self);
 
 static void
@@ -87,6 +89,8 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	    "Dream Audio source", "Source/Audio",
 	    "Provide an audio elementary stream from Dreambox encoder device",
 	    "Andreas Frisch <fraxinas@opendreambox.org>");
+
+	gstelement_class->change_state = gst_dreamaudiosource_change_state;
 
 	gstbasesrc_class->get_caps = gst_dreamaudiosource_getcaps;
 	gstbasesrc_class->start = gst_dreamaudiosource_start;
@@ -117,25 +121,6 @@ gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self)
 	return self->base_pts;
 }
 
-gboolean
-gst_dreamaudiosource_plugin_init (GstPlugin *plugin)
-{
-	GST_DEBUG_CATEGORY_INIT (dreamaudiosource_debug, "dreamaudiosource", 0, "dreamaudiosource");
-	return gst_element_register (plugin, "dreamaudiosource", GST_RANK_PRIMARY, GST_TYPE_DREAMAUDIOSOURCE);
-}
-
-static void
-gst_dreamaudiosource_init (GstDreamAudioSource * self)
-{
-	self->encoder = NULL;
-	self->descriptors_available = 0;
-	self->base_pts = GST_CLOCK_TIME_NONE;
-	g_mutex_init (&self->mutex);
-	
-	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
-	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
-}
-
 static void gst_dreamaudiosource_set_bitrate (GstDreamAudioSource * self, uint32_t bitrate)
 {
 	if (!self->encoder || !self->encoder->fd)
@@ -149,6 +134,60 @@ static void gst_dreamaudiosource_set_bitrate (GstDreamAudioSource * self, uint32
 	}
 	GST_INFO_OBJECT (self, "set audio bitrate to %i kBytes/s", bitrate);
 	self->audio_info.bitrate = abr;
+}
+
+gboolean
+gst_dreamaudiosource_plugin_init (GstPlugin *plugin)
+{
+	GST_DEBUG_CATEGORY_INIT (dreamaudiosource_debug, "dreamaudiosource", 0, "dreamaudiosource");
+	return gst_element_register (plugin, "dreamaudiosource", GST_RANK_PRIMARY, GST_TYPE_DREAMAUDIOSOURCE);
+}
+
+static void
+gst_dreamaudiosource_init (GstDreamAudioSource * self)
+{
+	self->encoder = NULL;
+	self->descriptors_available = 0;
+	g_mutex_init (&self->mutex);
+	
+	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
+	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
+
+	self->encoder = malloc(sizeof(EncoderInfo));
+
+	if(!self->encoder) {
+		GST_ERROR_OBJECT(self,"out of space");
+		return;
+	}
+
+	char fn_buf[32];
+	sprintf(fn_buf, "/dev/aenc%d", 0);
+	self->encoder->fd = open(fn_buf, O_RDWR | O_SYNC);
+	if(self->encoder->fd <= 0) {
+		GST_ERROR_OBJECT(self,"cannot open device %s (%s)", fn_buf, strerror(errno));
+		free(self->encoder);
+		self->encoder = NULL;
+		return;
+	}
+
+	self->encoder->buffer = malloc(ABUFSIZE);
+	if(!self->encoder->buffer) {
+		GST_ERROR_OBJECT(self,"cannot alloc buffer");
+		return;
+	}
+
+	self->encoder->cdb = (unsigned char *)mmap(0, AMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
+	if(!self->encoder->cdb || self->encoder->cdb== MAP_FAILED) {
+		GST_ERROR_OBJECT(self,"cannot mmap cdb: %s (%d)", strerror(errno));
+		return;
+	}
+
+#ifdef dump
+	self->dumpfd = open("/media/hdd/movie/dreamaudiosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
+	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
+#endif
+
+	gst_dreamaudiosource_set_bitrate(self, DEFAULT_BITRATE);
 }
 
 static void
@@ -234,7 +273,9 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 			self->descriptors_count = 0;
 			int rlen = read(enc->fd, enc->buffer, ABUFSIZE);
 			if (rlen <= 0 || rlen % ABDSIZE ) {
-				GST_WARNING_OBJECT (self, "read error %d (errno %i)", rlen, errno);
+				if ( errno == 512 )
+					return GST_FLOW_FLUSHING;
+				GST_WARNING_OBJECT (self, "read error %s", strerror(errno));
 				return GST_FLOW_ERROR;
 			}
 			self->descriptors_available = rlen / ABDSIZE;
@@ -319,67 +360,51 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 	return GST_FLOW_ERROR;
 }
 
+static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * element, GstStateChange transition)
+{
+	g_return_val_if_fail (element, GST_STATE_CHANGE_FAILURE);
+	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (element);
+	int ret;
+
+	switch (transition) {
+		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
+			self->base_pts = GST_CLOCK_TIME_NONE;
+			ret = ioctl(self->encoder->fd, AENC_START);
+			if ( ret != 0 )
+			{
+				GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
+				return GST_STATE_CHANGE_FAILURE;
+			}
+			GST_INFO_OBJECT (self, "started encoder!");
+			break;
+		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED");
+			ret = ioctl(self->encoder->fd, AENC_STOP);
+			if ( ret != 0 )
+			{
+				GST_ERROR_OBJECT(self,"can't stop encoder ioctl!");
+				return GST_STATE_CHANGE_FAILURE;
+			}
+			GST_INFO_OBJECT (self, "stopped encoder!");
+			break;
+		default:
+			break;
+	}
+
+	if (GST_ELEMENT_CLASS (parent_class)->change_state)
+		return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+
+	return GST_STATE_CHANGE_SUCCESS;
+}
+
 static gboolean
 gst_dreamaudiosource_start (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
-
-
-	char fn_buf[32];
-
-	self->encoder = malloc(sizeof(EncoderInfo));
-
-	if(!self->encoder) {
-		GST_ERROR_OBJECT(self,"out of space");
-		return FALSE;
-	}
-
-	sprintf(fn_buf, "/dev/aenc%d", 0);
-	self->encoder->fd = open(fn_buf, O_RDWR | O_SYNC);
-	if(self->encoder->fd <= 0) {
-		GST_ERROR_OBJECT(self,"cannot open device %s (%s)", fn_buf, strerror(errno));
-		free(self->encoder);
-		self->encoder = NULL;
-		return FALSE;
-	}
-
-	self->encoder->buffer = malloc(ABUFSIZE);
-	if(!self->encoder->buffer) {
-		GST_ERROR_OBJECT(self,"cannot alloc buffer");
-		return FALSE;
-	}
-
-	self->encoder->cdb = (unsigned char *)mmap(0, AMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
-
-	if(!self->encoder->cdb || self->encoder->cdb== MAP_FAILED) {
-		GST_ERROR_OBJECT(self,"cannot mmap cdb: %s (%d)", strerror(errno));
-		return FALSE;
-	}
-#ifdef dump
-	self->dumpfd = open("/media/hdd/movie/dreamaudiosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
-	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
-#endif
-	
-	GST_DEBUG_OBJECT (self, "cdb buffer mapped to %08x", self->encoder->cdb);
-	
-	gst_dreamaudiosource_set_bitrate(self, DEFAULT_BITRATE);
-	
-	int rlen = 0;
-	do {
-		rlen = read(self->encoder->fd, self->encoder->buffer, ABUFSIZE);
-		GST_DEBUG_OBJECT (self, "flushed %d bytes", rlen);
-	} while (rlen > 0);
-	
-	int ret = ioctl(self->encoder->fd, AENC_START);
-	if ( ret != 0 )
-	{
-		GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
-		return FALSE;
-	}
-	GST_INFO_OBJECT (self, "started encoder!");
-	
 	self->dreamvideosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamvideosource0");
-	
+	self->base_pts = GST_CLOCK_TIME_NONE;
+	GST_DEBUG_OBJECT (self, "started. reference to dreamvideosource=%" GST_PTR_FORMAT"", self->dreamvideosrc);
 	return TRUE;
 }
 
@@ -387,14 +412,6 @@ static gboolean
 gst_dreamaudiosource_stop (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
-	if (self->encoder) {
-		if (self->encoder->fd > 0)
-			ioctl(self->encoder->fd, AENC_STOP);
-		close(self->encoder->fd);
-	}
-#ifdef dump
-	close(self->dumpfd);
-#endif
 	GST_DEBUG_OBJECT (self, "closed");
 	return TRUE;
 }
@@ -410,6 +427,9 @@ gst_dreamaudiosource_finalize (GObject * gobject)
 			munmap(self->encoder->cdb, AMMAPSIZE);
 		free(self->encoder);
 	}
+#ifdef dump
+	close(self->dumpfd);
+#endif
 	g_mutex_clear (&self->mutex);
 	GST_DEBUG_OBJECT (self, "finalized");
 	G_OBJECT_CLASS (parent_class)->finalize (gobject);

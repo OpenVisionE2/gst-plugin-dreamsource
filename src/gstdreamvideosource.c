@@ -140,29 +140,6 @@ gst_dreamvideosource_get_base_pts (GstDreamVideoSource *self)
 	return self->base_pts;
 }
 
-gboolean
-gst_dreamvideosource_plugin_init (GstPlugin *plugin)
-{
-	GST_DEBUG_CATEGORY_INIT (dreamvideosource_debug, "dreamvideosource", 0, "dreamvideosource");
-	return gst_element_register (plugin, "dreamvideosource", GST_RANK_PRIMARY, GST_TYPE_DREAMVIDEOSOURCE);
-}
-
-static void
-gst_dreamvideosource_init (GstDreamVideoSource * self)
-{
-	GstPadTemplate *pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
-	self->current_caps = gst_pad_template_get_caps (pad_template);
-
-	self->encoder = NULL;
-	self->descriptors_available = 0;
-	self->base_pts = GST_CLOCK_TIME_NONE;
-
-	g_mutex_init (&self->mutex);
-	
-	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
-	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
-}
-
 static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32_t bitrate)
 {
 	if (!self->encoder || !self->encoder->fd)
@@ -257,6 +234,66 @@ fail:
 	return FALSE;
 }
 
+
+gboolean
+gst_dreamvideosource_plugin_init (GstPlugin *plugin)
+{
+	GST_DEBUG_CATEGORY_INIT (dreamvideosource_debug, "dreamvideosource", 0, "dreamvideosource");
+	return gst_element_register (plugin, "dreamvideosource", GST_RANK_PRIMARY, GST_TYPE_DREAMVIDEOSOURCE);
+}
+
+static void
+gst_dreamvideosource_init (GstDreamVideoSource * self)
+{
+	GstPadTemplate *pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
+	self->current_caps = gst_pad_template_get_caps (pad_template);
+
+	self->encoder = NULL;
+	self->descriptors_available = 0;
+
+	g_mutex_init (&self->mutex);
+
+	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
+	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
+
+	self->encoder = malloc(sizeof(EncoderInfo));
+
+	if(!self->encoder) {
+		GST_ERROR_OBJECT(self,"out of space");
+		return;
+	}
+
+	char fn_buf[32];
+	sprintf(fn_buf, "/dev/venc%d", 0);
+	self->encoder->fd = open(fn_buf, O_RDWR | O_SYNC);
+	if(self->encoder->fd <= 0) {
+		GST_ERROR_OBJECT(self,"cannot open device %s (%s)", fn_buf, strerror(errno));
+		free(self->encoder);
+		self->encoder = NULL;
+		return;
+	}
+
+	self->encoder->buffer = malloc(VBUFSIZE);
+	if(!self->encoder->buffer) {
+		GST_ERROR_OBJECT(self,"cannot alloc buffer");
+		return;
+	}
+
+	self->encoder->cdb = (unsigned char *)mmap(0, VMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
+
+	if(!self->encoder->cdb) {
+		GST_ERROR_OBJECT(self,"cannot mmap cdb");
+		return;
+	}
+
+#ifdef dump
+	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
+	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
+#endif
+
+	gst_dreamvideosource_set_bitrate(self, DEFAULT_BITRATE);
+}
+
 static void
 gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec)
 {
@@ -338,7 +375,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 		gst_element_get_state (GST_ELEMENT(self), &state, NULL, 1*GST_MSECOND);
 		if (state == GST_STATE_PLAYING)
 		{
-			GST_WARNING_OBJECT (self, "can't change caps while in RUNNING state %" GST_PTR_FORMAT, caps);
+			GST_WARNING_OBJECT (self, "can't change caps while in PLAYING state %" GST_PTR_FORMAT, caps);
 			return FALSE;
 		}
 		else if (gst_structure_has_name (structure, "video/x-h264"))
@@ -433,7 +470,9 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 			self->descriptors_count = 0;
 			int rlen = read(enc->fd, enc->buffer, VBUFSIZE);
 			if (rlen <= 0 || rlen % VBDSIZE ) {
-				GST_WARNING_OBJECT (self, "read error %d (errno %i)", rlen, errno);
+				if ( errno == 512 )
+					return GST_FLOW_FLUSHING;
+				GST_WARNING_OBJECT (self, "read error %s", strerror(errno));
 				return GST_FLOW_ERROR;
 			}
 			self->descriptors_available = rlen / VBDSIZE;
@@ -530,6 +569,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 	switch (transition) {
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
+			self->base_pts = GST_CLOCK_TIME_NONE;
 			ret = ioctl(self->encoder->fd, VENC_START);
 			if ( ret != 0 )
 			{
@@ -546,6 +586,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 				GST_ERROR_OBJECT(self,"can't stop encoder ioctl!");
 				return GST_STATE_CHANGE_FAILURE;
 			}
+			GST_INFO_OBJECT (self, "stopped encoder!");
 			break;
 		default:
 			break;
@@ -556,50 +597,13 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 
 	return GST_STATE_CHANGE_SUCCESS;
 }
+
 static gboolean
 gst_dreamvideosource_start (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-
-	char fn_buf[32];
-
-	self->encoder = malloc(sizeof(EncoderInfo));
-
-	if(!self->encoder) {
-		GST_ERROR_OBJECT(self,"out of space");
-		return FALSE;
-	}
-
-	sprintf(fn_buf, "/dev/venc%d", 0);
-	self->encoder->fd = open(fn_buf, O_RDWR | O_SYNC);
-	if(self->encoder->fd <= 0) {
-		GST_ERROR_OBJECT(self,"cannot open device %s (%s)", fn_buf, strerror(errno));
-		free(self->encoder);
-		self->encoder = NULL;
-		return FALSE;
-	}
-
-	self->encoder->buffer = malloc(VBUFSIZE);
-	if(!self->encoder->buffer) {
-		GST_ERROR_OBJECT(self,"cannot alloc buffer");
-		return FALSE;
-	}
-
-	self->encoder->cdb = (unsigned char *)mmap(0, VMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
-
-	if(!self->encoder->cdb) {
-		GST_ERROR_OBJECT(self,"cannot mmap cdb");
-		return FALSE;
-	}
-#ifdef dump
-	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
-	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
-#endif
-
-	gst_dreamvideosource_set_bitrate(self, DEFAULT_BITRATE);
-
 	self->dreamaudiosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamaudiosource0");
-
+	GST_DEBUG_OBJECT (self, "started. reference to dreamaudiosource=%" GST_PTR_FORMAT"", self->dreamaudiosrc);
 	return TRUE;
 }
 
@@ -607,15 +611,7 @@ static gboolean
 gst_dreamvideosource_stop (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	if (self->encoder) {
-		if (self->encoder->fd > 0)
-			ioctl(self->encoder->fd, VENC_STOP);
-		close(self->encoder->fd);
-	}
-#ifdef dump
-	close(self->dumpfd);
-#endif
-	GST_DEBUG_OBJECT (self, "closed");
+	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }
 
@@ -630,6 +626,9 @@ gst_dreamvideosource_finalize (GObject * gobject)
 			munmap(self->encoder->cdb, VMMAPSIZE);
 		free(self->encoder);
 	}
+#ifdef dump
+	close(self->dumpfd);
+#endif
 	if (self->current_caps)
 		gst_caps_unref(self->current_caps);
 	g_mutex_clear (&self->mutex);
