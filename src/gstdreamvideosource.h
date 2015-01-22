@@ -112,6 +112,8 @@ struct _GstDreamVideoSource
 	GstClockTime base_pts;
 
 	GMutex mutex;
+
+	int buffers_in_use;
 };
 
 struct _GstDreamVideoSourceClass

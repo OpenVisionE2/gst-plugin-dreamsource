@@ -63,6 +63,13 @@ typedef struct _AudioBufferDescriptor      AudioBufferDescriptor;
 
 // #define dump 1
 
+struct _bufferdebug
+{
+	GstDreamAudioSource *self;
+	GstBuffer *buffer;
+	GstClockTime buffer_pts;
+};
+
 struct _GstDreamAudioSource
 {
 	GstPushSrc element;
@@ -81,6 +88,8 @@ struct _GstDreamAudioSource
 	GstClockTime base_pts;
 	
 	GMutex mutex;
+
+	GList *buffers_list;
 };
 
 struct _GstDreamAudioSourceClass

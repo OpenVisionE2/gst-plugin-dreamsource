@@ -56,7 +56,7 @@ G_DEFINE_TYPE (GstDreamAudioSource, gst_dreamaudiosource, GST_TYPE_PUSH_SRC);
 static GstCaps *gst_dreamaudiosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
 static gboolean gst_dreamaudiosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamaudiosource_stop (GstBaseSrc * bsrc);
-static void gst_dreamaudiosource_finalize (GObject * gobject);
+static void gst_dreamaudiosource_dispose (GObject * gobject);
 static GstFlowReturn gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf);
 
 static void gst_dreamaudiosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec);
@@ -80,7 +80,7 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 
 	gobject_class->set_property = gst_dreamaudiosource_set_property;
 	gobject_class->get_property = gst_dreamaudiosource_get_property;
-	gobject_class->finalize = gst_dreamaudiosource_finalize;
+	gobject_class->dispose = gst_dreamaudiosource_dispose;
 
 	gst_element_class_add_pad_template (gstelement_class,
 					    gst_static_pad_template_get (&srctemplate));
@@ -117,7 +117,7 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 static gint64
 gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self)
 {
-	GST_DEBUG_OBJECT (self, "gst_dreamaudiosource_get_base_pts " GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
+	GST_DEBUG_OBJECT (self, "gst_dreamaudiosource_get_base_pts %" GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
 	return self->base_pts;
 }
 
@@ -148,6 +148,7 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 {
 	self->encoder = NULL;
 	self->descriptors_available = 0;
+
 	g_mutex_init (&self->mutex);
 
 	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
@@ -244,9 +245,17 @@ gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 }
 
 static void
-gst_dreamaudiosource_free_buffer (GstDreamAudioSource * self)
+gst_dreamaudiosource_free_buffer (struct _bufferdebug * bufferdebug)
 {
-	GST_LOG_OBJECT (self, "gst_dreamaudiosource_free_buffer");
+	GList *list = g_list_first (bufferdebug->self->buffers_list);
+	int count = 0;
+	while (list) {
+		GST_TRACE_OBJECT (bufferdebug->self, "buffers_list[%i] = %" GST_PTR_FORMAT "", count, list->data);
+		count++;
+		list = g_list_next (list);
+	}
+	bufferdebug->self->buffers_list = g_list_remove(g_list_first (bufferdebug->self->buffers_list), bufferdebug->buffer);
+	GST_TRACE_OBJECT (bufferdebug->self, "removing %" GST_PTR_FORMAT " @ %" GST_TIME_FORMAT " from list -> new length=%i", bufferdebug->buffer, GST_TIME_ARGS (bufferdebug->buffer_pts), g_list_length(bufferdebug->self->buffers_list));
 }
 
 static GstFlowReturn
@@ -295,7 +304,11 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 				continue;
 			}
 
-			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, (GDestroyNotify)gst_dreamaudiosource_free_buffer);
+			struct _bufferdebug * bdg = malloc(sizeof(struct _bufferdebug));
+			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, bdg, (GDestroyNotify)gst_dreamaudiosource_free_buffer);
+			bdg->self = self;
+			bdg->buffer = *outbuf;
+			self->buffers_list = g_list_append(self->buffers_list, *outbuf);
 
 			if (f & CDB_FLAG_PTS_VALID)
 			{
@@ -326,6 +339,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					GST_BUFFER_PTS(*outbuf) = buffer_time;
 					GST_BUFFER_DTS(*outbuf) = buffer_time;
 				}
+				bdg->buffer_pts = buffer_time;
 			}
 
 #ifdef dump
@@ -360,10 +374,8 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * element, GstStateChange transition)
 {
-	g_return_val_if_fail (element, GST_STATE_CHANGE_FAILURE);
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (element);
 	int ret;
-
 	switch (transition) {
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
@@ -374,11 +386,18 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 				GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
 				return GST_STATE_CHANGE_FAILURE;
 			}
+			self->descriptors_available = 0;
 			GST_INFO_OBJECT (self, "started encoder!");
 			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED");
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
+			GST_OBJECT_LOCK (self);
+			while (self->descriptors_count < self->descriptors_available)
+				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
+			if (self->descriptors_count)
+				write(self->encoder->fd, &self->descriptors_count, 4);
 			ret = ioctl(self->encoder->fd, AENC_STOP);
+			GST_OBJECT_UNLOCK (self);
 			if ( ret != 0 )
 			{
 				GST_ERROR_OBJECT(self,"can't stop encoder ioctl!");
@@ -389,10 +408,8 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 		default:
 			break;
 	}
-
 	if (GST_ELEMENT_CLASS (parent_class)->change_state)
 		return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
-
 	return GST_STATE_CHANGE_SUCCESS;
 }
 
@@ -401,7 +418,6 @@ gst_dreamaudiosource_start (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
 	self->dreamvideosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamvideosource0");
-	self->base_pts = GST_CLOCK_TIME_NONE;
 	GST_DEBUG_OBJECT (self, "started. reference to dreamvideosource=%" GST_PTR_FORMAT"", self->dreamvideosrc);
 	return TRUE;
 }
@@ -410,12 +426,13 @@ static gboolean
 gst_dreamaudiosource_stop (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
-	GST_DEBUG_OBJECT (self, "closed");
+	gst_object_unref(self->dreamvideosrc);
+	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }
 
 static void
-gst_dreamaudiosource_finalize (GObject * gobject)
+gst_dreamaudiosource_dispose (GObject * gobject)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (gobject);
 	if (self->encoder) {
@@ -423,12 +440,15 @@ gst_dreamaudiosource_finalize (GObject * gobject)
 			free(self->encoder->buffer);
 		if (self->encoder->cdb)
 			munmap(self->encoder->cdb, AMMAPSIZE);
+		if (self->encoder->fd)
+			close(self->encoder->fd);
 		free(self->encoder);
 	}
 #ifdef dump
 	close(self->dumpfd);
 #endif
+	g_list_free(self->buffers_list);
 	g_mutex_clear (&self->mutex);
-	GST_DEBUG_OBJECT (self, "finalized");
-	G_OBJECT_CLASS (parent_class)->finalize (gobject);
+	GST_DEBUG_OBJECT (self, "disposed");
+	G_OBJECT_CLASS (parent_class)->dispose (gobject);
 }

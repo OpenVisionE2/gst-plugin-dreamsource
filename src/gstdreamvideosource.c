@@ -69,7 +69,7 @@ static GstCaps *gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps);
 
 static gboolean gst_dreamvideosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_stop (GstBaseSrc * bsrc);
-static void gst_dreamvideosource_finalize (GObject * gobject);
+static void gst_dreamvideosource_dispose (GObject * gobject);
 static GstFlowReturn gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf);
 
 static void gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue * value, GParamSpec * pspec);
@@ -93,7 +93,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 
 	gobject_class->set_property = gst_dreamvideosource_set_property;
 	gobject_class->get_property = gst_dreamvideosource_get_property;
-	gobject_class->finalize = gst_dreamvideosource_finalize;
+	gobject_class->dispose = gst_dreamvideosource_dispose;
 
 	gst_element_class_add_pad_template (gstelement_class,
 					    gst_static_pad_template_get (&srctemplate));
@@ -136,7 +136,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 static gint64
 gst_dreamvideosource_get_base_pts (GstDreamVideoSource *self)
 {
-	GST_DEBUG_OBJECT (self, "gst_dreamvideosource_get_base_pts " GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
+	GST_DEBUG_OBJECT (self, "gst_dreamvideosource_get_base_pts %" GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
 	return self->base_pts;
 }
 
@@ -245,6 +245,8 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 
 	self->encoder = NULL;
 	self->descriptors_available = 0;
+
+	self->buffers_in_use = 0;
 
 	g_mutex_init (&self->mutex);
 
@@ -421,7 +423,8 @@ gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 static void
 gst_dreamvideosource_free_buffer (GstDreamVideoSource * self)
 {
-	GST_LOG_OBJECT (self, "gst_dreamvideosource_free_buffer");
+	self->buffers_in_use--;
+	GST_TRACE_OBJECT (self, "gst_dreamvideosource_free_buffer buffer still in use: %i", self->buffers_in_use);
 }
 
 static GstFlowReturn
@@ -528,6 +531,7 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 		if (*outbuf)
 		{
+			self->buffers_in_use++;
 			GST_DEBUG_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
 			return GST_FLOW_OK;
 		}
@@ -538,7 +542,6 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition)
 {
-	g_return_val_if_fail (GST_DREAMVIDEOSOURCE (element), FALSE);
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (element);
 	int ret;
 
@@ -552,11 +555,18 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 				GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
 				return GST_STATE_CHANGE_FAILURE;
 			}
+			self->descriptors_available = 0;
 			GST_INFO_OBJECT (self, "started encoder!");
 			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED");
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
+			GST_OBJECT_LOCK (self);
+			while (self->descriptors_count < self->descriptors_available)
+				GST_INFO_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
+			if (self->descriptors_count)
+				write(self->encoder->fd, &self->descriptors_count, 4);
 			ret = ioctl(self->encoder->fd, VENC_STOP);
+			GST_OBJECT_UNLOCK (self);
 			if ( ret != 0 )
 			{
 				GST_ERROR_OBJECT(self,"can't stop encoder ioctl!");
@@ -567,10 +577,8 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 		default:
 			break;
 	}
-
 	if (GST_ELEMENT_CLASS (parent_class)->change_state)
 		return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
-
 	return GST_STATE_CHANGE_SUCCESS;
 }
 
@@ -587,12 +595,13 @@ static gboolean
 gst_dreamvideosource_stop (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
+	gst_object_unref(self->dreamaudiosrc);
 	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }
 
 static void
-gst_dreamvideosource_finalize (GObject * gobject)
+gst_dreamvideosource_dispose (GObject * gobject)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (gobject);
 	if (self->encoder) {
@@ -600,6 +609,8 @@ gst_dreamvideosource_finalize (GObject * gobject)
 			free(self->encoder->buffer);
 		if (self->encoder->cdb)
 			munmap(self->encoder->cdb, VMMAPSIZE);
+		if (self->encoder->fd)
+			close(self->encoder->fd);
 		free(self->encoder);
 	}
 #ifdef dump
@@ -608,6 +619,6 @@ gst_dreamvideosource_finalize (GObject * gobject)
 	if (self->current_caps)
 		gst_caps_unref(self->current_caps);
 	g_mutex_clear (&self->mutex);
-	GST_DEBUG_OBJECT (self, "finalized");
-	G_OBJECT_CLASS (parent_class)->finalize (gobject);
+	GST_DEBUG_OBJECT (self, "disposed");
+	G_OBJECT_CLASS (parent_class)->dispose (gobject);
 }
