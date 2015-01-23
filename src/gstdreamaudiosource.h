@@ -9,7 +9,7 @@
  * Creative Commons,559 Nathan Abbott Way,Stanford,California 94305,USA.
  *
  * Alternatively, this program may be distributed and executed on
- * hardware which is licensed by Dream Multimedia GmbH.
+ * hardware which is licensed by Dream Property GmbH.
  *
  * This program is NOT free software. It is open source, you are allowed
  * to modify it (if you keep the license), but it may not be commercially
@@ -83,10 +83,10 @@ struct _GstDreamAudioSource
 
 	int dumpfd;
 	goffset dumpsize;
-	
+
 	GstElement *dreamvideosrc;
 	GstClockTime base_pts;
-	
+
 	GMutex mutex;
 
 	GList *buffers_list;

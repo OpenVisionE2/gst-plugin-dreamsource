@@ -9,7 +9,7 @@
  * Creative Commons,559 Nathan Abbott Way,Stanford,California 94305,USA.
  *
  * Alternatively, this program may be distributed and executed on
- * hardware which is licensed by Dream Multimedia GmbH.
+ * hardware which is licensed by Dream Property GmbH.
  *
  * This program is NOT free software. It is open source, you are allowed
  * to modify it (if you keep the license), but it may not be commercially
@@ -283,7 +283,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 			if (rlen <= 0 || rlen % ABDSIZE ) {
 				if ( errno == 512 )
 					return GST_FLOW_FLUSHING;
-				GST_WARNING_OBJECT (self, "read error %s", strerror(errno));
+				GST_WARNING_OBJECT (self, "read error %s (%i)", strerror(errno), errno);
 				return GST_FLOW_ERROR;
 			}
 			self->descriptors_available = rlen / ABDSIZE;
