@@ -595,7 +595,8 @@ static gboolean
 gst_dreamvideosource_stop (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	gst_object_unref(self->dreamaudiosrc);
+	if (self->dreamaudiosrc)
+		gst_object_unref(self->dreamaudiosrc);
 	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }
