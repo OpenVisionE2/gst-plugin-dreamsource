@@ -21,7 +21,26 @@
 #endif
 
 #include <gst/gst.h>
+#include <sys/poll.h>
+#include <sys/socket.h>
 #include "gstdreamaudiosource.h"
+
+#define CONTROL_STOP            'S'     /* stop the select call */
+#define CONTROL_SOCKETS(src)   src->control_sock
+#define WRITE_SOCKET(src)      src->control_sock[1]
+#define READ_SOCKET(src)       src->control_sock[0]
+
+#define SEND_COMMAND(src, command)          \
+G_STMT_START {                              \
+  int G_GNUC_UNUSED _res; unsigned char c; c = command;   \
+  _res = write (WRITE_SOCKET(src), &c, 1);  \
+} G_STMT_END
+
+#define READ_COMMAND(src, command, res)        \
+G_STMT_START {                                 \
+  res = read(READ_SOCKET(src), &command, 1);   \
+} G_STMT_END
+
 
 GST_DEBUG_CATEGORY_STATIC (dreamaudiosource_debug);
 #define GST_CAT_DEFAULT dreamaudiosource_debug
@@ -56,6 +75,7 @@ G_DEFINE_TYPE (GstDreamAudioSource, gst_dreamaudiosource, GST_TYPE_PUSH_SRC);
 static GstCaps *gst_dreamaudiosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
 static gboolean gst_dreamaudiosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamaudiosource_stop (GstBaseSrc * bsrc);
+static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc);
 static void gst_dreamaudiosource_dispose (GObject * gobject);
 static GstFlowReturn gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf);
 
@@ -95,6 +115,7 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	gstbasesrc_class->get_caps = gst_dreamaudiosource_getcaps;
 	gstbasesrc_class->start = gst_dreamaudiosource_start;
 	gstbasesrc_class->stop = gst_dreamaudiosource_stop;
+	gstbasesrc_class->unlock = gst_dreamaudiosource_unlock;
 
 	gstpush_src_class->create = gst_dreamaudiosource_create;
 
@@ -150,6 +171,8 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 	self->descriptors_available = 0;
 
 	g_mutex_init (&self->mutex);
+	READ_SOCKET (self) = -1;
+	WRITE_SOCKET (self) = -1;
 
 	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
 	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
@@ -170,6 +193,9 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 		self->encoder = NULL;
 		return;
 	}
+
+	int flags = fcntl(self->encoder->fd, F_GETFL, 0);
+	fcntl(self->encoder->fd, F_SETFL, flags | O_NONBLOCK);
 
 	self->encoder->buffer = malloc(ABUFSIZE);
 	if(!self->encoder->buffer) {
@@ -244,6 +270,14 @@ gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 	return caps;
 }
 
+static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc)
+{
+	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
+	GST_LOG_OBJECT (self, "stop creating buffers");
+	SEND_COMMAND (self, CONTROL_STOP);
+	return TRUE;
+}
+
 static void
 gst_dreamaudiosource_free_buffer (struct _bufferdebug * bufferdebug)
 {
@@ -263,6 +297,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (psrc);
 	EncoderInfo *enc = self->encoder;
+
 	static int dumpoffset;
 
 	GST_LOG_OBJECT (self, "new buffer requested");
@@ -279,15 +314,45 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 		if (self->descriptors_available == 0)
 		{
 			self->descriptors_count = 0;
-			int rlen = read(enc->fd, enc->buffer, ABUFSIZE);
-			if (rlen <= 0 || rlen % ABDSIZE ) {
-				if ( errno == 512 )
-					return GST_FLOW_FLUSHING;
-				GST_WARNING_OBJECT (self, "read error %s (%i)", strerror(errno), errno);
+			struct pollfd rfd[2];
+
+			rfd[0].fd = enc->fd;
+			rfd[0].events = POLLIN;
+			rfd[1].fd = READ_SOCKET (self);
+			rfd[1].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
+
+			int ret = poll(rfd, 2, 200);
+
+			if (G_UNLIKELY (ret == -1))
+			{
+				GST_ERROR_OBJECT (self, "SELECT ERROR!");
 				return GST_FLOW_ERROR;
 			}
-			self->descriptors_available = rlen / ABDSIZE;
-			GST_LOG_OBJECT (self, "encoder buffer was empty, %d descriptors available", self->descriptors_available);
+			else if ( ret == 0 )
+			{
+				GST_LOG_OBJECT (self, "SELECT TIMEOUT");
+				//!!! TODO generate dummy payload
+				*outbuf = gst_buffer_new();
+			}
+			else if ( G_UNLIKELY (rfd[1].revents) )
+			{
+				char command;
+				READ_COMMAND (self, command, ret);
+				GST_LOG_OBJECT (self, "CONTROL_STOP!");
+				return GST_FLOW_FLUSHING;
+			}
+			else if ( G_LIKELY(rfd[0].revents & POLLIN) )
+			{
+				int rlen = read(enc->fd, enc->buffer, ABUFSIZE);
+				if (rlen <= 0 || rlen % ABDSIZE ) {
+					if ( errno == 512 )
+						return GST_FLOW_FLUSHING;
+					GST_WARNING_OBJECT (self, "read error %s (%i)", strerror(errno), errno);
+					return GST_FLOW_ERROR;
+				}
+				self->descriptors_available = rlen / ABDSIZE;
+				GST_LOG_OBJECT (self, "encoder buffer was empty, %d descriptors available", self->descriptors_available);
+			}
 		}
 
 		while (self->descriptors_count < self->descriptors_available) {
@@ -418,6 +483,18 @@ gst_dreamaudiosource_start (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
 	self->dreamvideosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamvideosource0");
+
+	int control_sock[2];
+	if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
+	{
+		GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE, (NULL), GST_ERROR_SYSTEM);
+		return FALSE;
+	}
+	READ_SOCKET (self) = control_sock[0];
+	WRITE_SOCKET (self) = control_sock[1];
+	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
+	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
+
 	GST_DEBUG_OBJECT (self, "started. reference to dreamvideosource=%" GST_PTR_FORMAT"", self->dreamvideosrc);
 	return TRUE;
 }

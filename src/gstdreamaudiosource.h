@@ -88,6 +88,7 @@ struct _GstDreamAudioSource
 	GstClockTime base_pts;
 
 	GMutex mutex;
+	int control_sock[2];
 
 	GList *buffers_list;
 };
