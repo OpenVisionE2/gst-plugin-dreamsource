@@ -168,6 +168,7 @@ static void
 gst_dreamaudiosource_init (GstDreamAudioSource * self)
 {
 	self->encoder = NULL;
+	self->buffers_list = NULL;
 	self->descriptors_available = 0;
 
 	g_mutex_init (&self->mutex);
@@ -371,11 +372,22 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 				continue;
 			}
 
-			struct _bufferdebug * bdg = malloc(sizeof(struct _bufferdebug));
-			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, bdg, (GDestroyNotify)gst_dreamaudiosource_free_buffer);
-			bdg->self = self;
-			bdg->buffer = *outbuf;
-			self->buffers_list = g_list_append(self->buffers_list, *outbuf);
+			struct _bufferdebug * bdg = NULL;
+			GDestroyNotify buffer_free_func = NULL;
+			if ( gst_debug_category_get_threshold (dreamaudiosource_debug) >= GST_LEVEL_TRACE)
+			{
+				bdg = malloc(sizeof(struct _bufferdebug));
+				buffer_free_func = (GDestroyNotify) gst_dreamaudiosource_free_buffer;
+			}
+
+			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, bdg, buffer_free_func);
+
+			if (bdg)
+			{
+				bdg->self = self;
+				bdg->buffer = *outbuf;
+				self->buffers_list = g_list_append(self->buffers_list, *outbuf);
+			}
 
 			if (f & CDB_FLAG_PTS_VALID)
 			{
@@ -406,7 +418,8 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					GST_BUFFER_PTS(*outbuf) = buffer_time;
 					GST_BUFFER_DTS(*outbuf) = buffer_time;
 				}
-				bdg->buffer_pts = buffer_time;
+				if (bdg)
+					bdg->buffer_pts = buffer_time;
 			}
 
 #ifdef dump
