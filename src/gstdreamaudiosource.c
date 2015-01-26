@@ -281,6 +281,7 @@ static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc)
 static void
 gst_dreamaudiosource_free_buffer (struct _bufferdebug * bufferdebug)
 {
+	GST_OBJECT_LOCK (bufferdebug->self);
 	GList *list = g_list_first (bufferdebug->self->buffers_list);
 	int count = 0;
 	while (list) {
@@ -290,6 +291,7 @@ gst_dreamaudiosource_free_buffer (struct _bufferdebug * bufferdebug)
 	}
 	bufferdebug->self->buffers_list = g_list_remove(g_list_first (bufferdebug->self->buffers_list), bufferdebug->buffer);
 	GST_TRACE_OBJECT (bufferdebug->self, "removing %" GST_PTR_FORMAT " @ %" GST_TIME_FORMAT " from list -> new length=%i", bufferdebug->buffer, GST_TIME_ARGS (bufferdebug->buffer_pts), g_list_length(bufferdebug->self->buffers_list));
+	GST_OBJECT_UNLOCK (bufferdebug->self);
 }
 
 static GstFlowReturn
