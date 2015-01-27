@@ -29,10 +29,27 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
 #include "gstdreamsource-marshal.h"
+
+#define CONTROL_STOP            'S'     /* stop the select call */
+#define CONTROL_SOCKETS(src)   src->control_sock
+#define WRITE_SOCKET(src)      src->control_sock[1]
+#define READ_SOCKET(src)       src->control_sock[0]
+
+#define SEND_COMMAND(src, command)          \
+G_STMT_START {                              \
+  int G_GNUC_UNUSED _res; unsigned char c; c = command;   \
+  _res = write (WRITE_SOCKET(src), &c, 1);  \
+} G_STMT_END
+
+#define READ_COMMAND(src, command, res)        \
+G_STMT_START {                                 \
+  res = read(READ_SOCKET(src), &command, 1);   \
+} G_STMT_END
 
 G_BEGIN_DECLS
 

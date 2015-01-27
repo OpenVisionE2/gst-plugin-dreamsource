@@ -23,6 +23,7 @@
 
 #include "gstdreamaudiosource.h"
 #include "gstdreamvideosource.h"
+#include "gstdreamtssource.h"
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -30,6 +31,7 @@ plugin_init (GstPlugin * plugin)
   gboolean res = TRUE;
   res &= gst_dreamaudiosource_plugin_init (plugin);
   res &= gst_dreamvideosource_plugin_init (plugin);
+  res &= gst_dreamtssource_plugin_init (plugin);
 
   return res;
 }

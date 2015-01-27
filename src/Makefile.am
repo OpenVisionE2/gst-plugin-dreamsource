@@ -15,10 +15,10 @@ plugin_LTLIBRARIES = libgstdreamsource.la
 # flags used to compile this plugin
 # add other _CFLAGS and _LIBS as needed
 
-libgstdreamsource_la_SOURCES = gstdreamaudiosource.c gstdreamvideosource.c gstdreamsource.c $(built_sources)
+libgstdreamsource_la_SOURCES = gstdreamaudiosource.c gstdreamvideosource.c gstdreamtssource.c gstdreamsource.c $(built_sources)
 libgstdreamsource_la_CFLAGS = $(GST_CFLAGS)
 libgstdreamsource_la_LIBADD =  $(GST_LIBS) -lgstbase-1.0
 libgstdreamsource_la_LDFLAGS = $(GST_PLUGIN_LDFLAGS)
 
 # headers we need but don't want installed
-noinst_HEADERS = gstdreamaudiosource.h gstdreamvideosource.h gstdreamsource.h
+noinst_HEADERS = gstdreamaudiosource.h gstdreamvideosource.h gstdreamtssource.h gstdreamsource.h
