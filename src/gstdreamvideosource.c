@@ -287,8 +287,6 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
 	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
 #endif
-
-	gst_dreamvideosource_set_bitrate(self, DEFAULT_BITRATE);
 }
 
 static void
@@ -373,7 +371,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 		if (state == GST_STATE_PLAYING)
 		{
 			GST_WARNING_OBJECT (self, "can't change caps while in PLAYING state %" GST_PTR_FORMAT, caps);
-			return FALSE;
+			return TRUE;
 		}
 		else if (gst_structure_has_name (structure, "video/x-h264"))
 		{

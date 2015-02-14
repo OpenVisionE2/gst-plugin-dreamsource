@@ -214,8 +214,6 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 	self->dumpfd = open("/media/hdd/movie/dreamaudiosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
 	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
 #endif
-
-	gst_dreamaudiosource_set_bitrate(self, DEFAULT_BITRATE);
 }
 
 static void
