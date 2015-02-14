@@ -21,26 +21,7 @@
 #endif
 
 #include <gst/gst.h>
-#include <sys/poll.h>
-#include <sys/socket.h>
 #include "gstdreamaudiosource.h"
-
-#define CONTROL_STOP            'S'     /* stop the select call */
-#define CONTROL_SOCKETS(src)   src->control_sock
-#define WRITE_SOCKET(src)      src->control_sock[1]
-#define READ_SOCKET(src)       src->control_sock[0]
-
-#define SEND_COMMAND(src, command)          \
-G_STMT_START {                              \
-  int G_GNUC_UNUSED _res; unsigned char c; c = command;   \
-  _res = write (WRITE_SOCKET(src), &c, 1);  \
-} G_STMT_END
-
-#define READ_COMMAND(src, command, res)        \
-G_STMT_START {                                 \
-  res = read(READ_SOCKET(src), &command, 1);   \
-} G_STMT_END
-
 
 GST_DEBUG_CATEGORY_STATIC (dreamaudiosource_debug);
 #define GST_CAT_DEFAULT dreamaudiosource_debug
@@ -272,7 +253,7 @@ gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
-	GST_LOG_OBJECT (self, "stop creating buffers");
+	GST_DEBUG_OBJECT (self, "stop creating buffers");
 	SEND_COMMAND (self, CONTROL_STOP);
 	return TRUE;
 }
@@ -339,8 +320,11 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 			{
 				char command;
 				READ_COMMAND (self, command, ret);
-				GST_LOG_OBJECT (self, "CONTROL_STOP!");
-				return GST_FLOW_FLUSHING;
+				if (command == CONTROL_STOP)
+				{
+					GST_LOG_OBJECT (self, "CONTROL_STOP!");
+					return GST_FLOW_FLUSHING;
+				}
 			}
 			else if ( G_LIKELY(rfd[0].revents & POLLIN) )
 			{
@@ -453,42 +437,42 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * element, GstStateChange transition)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (element);
+	GstStateChangeReturn sret = GST_STATE_CHANGE_SUCCESS;
 	int ret;
+	GST_OBJECT_LOCK (self);
 	switch (transition) {
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
 			self->base_pts = GST_CLOCK_TIME_NONE;
 			ret = ioctl(self->encoder->fd, AENC_START);
 			if ( ret != 0 )
-			{
-				GST_ERROR_OBJECT(self,"can't start encoder ioctl!");
-				return GST_STATE_CHANGE_FAILURE;
-			}
+				goto fail;
 			self->descriptors_available = 0;
 			GST_INFO_OBJECT (self, "started encoder!");
 			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
-			GST_OBJECT_LOCK (self);
+			GST_INFO_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
+			//!!! TODO this frequently deadloops
 			while (self->descriptors_count < self->descriptors_available)
-				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
+				GST_INFO_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
 			if (self->descriptors_count)
 				write(self->encoder->fd, &self->descriptors_count, 4);
 			ret = ioctl(self->encoder->fd, AENC_STOP);
-			GST_OBJECT_UNLOCK (self);
 			if ( ret != 0 )
-			{
-				GST_ERROR_OBJECT(self,"can't stop encoder ioctl!");
-				return GST_STATE_CHANGE_FAILURE;
-			}
+				goto fail;
 			GST_INFO_OBJECT (self, "stopped encoder!");
 			break;
 		default:
 			break;
 	}
+	GST_OBJECT_UNLOCK (self);
 	if (GST_ELEMENT_CLASS (parent_class)->change_state)
-		return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
-	return GST_STATE_CHANGE_SUCCESS;
+		sret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+	return sret;
+fail:
+	GST_ERROR_OBJECT(self,"can't perform encoder ioctl!");
+	GST_OBJECT_UNLOCK (self);
+	return GST_STATE_CHANGE_FAILURE;
 }
 
 static gboolean

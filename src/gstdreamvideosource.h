@@ -112,6 +112,7 @@ struct _GstDreamVideoSource
 	GstClockTime base_pts;
 
 	GMutex mutex;
+	int control_sock[2];
 
 	int buffers_in_use;
 };
