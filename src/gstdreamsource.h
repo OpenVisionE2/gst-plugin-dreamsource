@@ -41,6 +41,12 @@
 #define WRITE_SOCKET(src)      src->control_sock[1]
 #define READ_SOCKET(src)       src->control_sock[0]
 
+#define CLEAR_COMMAND(src)                  \
+G_STMT_START {                              \
+  char c; ssize_t res;                      \
+  res = read(READ_SOCKET(src), &c, 1);      \
+} G_STMT_END
+
 #define SEND_COMMAND(src, command)          \
 G_STMT_START {                              \
   int G_GNUC_UNUSED _res; unsigned char c; c = command;   \

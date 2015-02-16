@@ -417,7 +417,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 		if (self->descriptors_count == self->descriptors_available) {
 			GST_LOG_OBJECT (self, "self->descriptors_count == self->descriptors_available -> release %i consumed descriptors", self->descriptors_count);
 			/* release consumed descs */
-			if (write(enc->fd, &self->descriptors_count, 4) != 4) {
+			if (write(enc->fd, &self->descriptors_count, sizeof(self->descriptors_count)) != sizeof(self->descriptors_count)) {
 				GST_WARNING_OBJECT (self, "release consumed descs write error!");
 				return GST_FLOW_ERROR;
 			}
@@ -448,15 +448,15 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 			if ( ret != 0 )
 				goto fail;
 			self->descriptors_available = 0;
+			CLEAR_COMMAND (self);
 			GST_INFO_OBJECT (self, "started encoder!");
 			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-			GST_INFO_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
-			//!!! TODO this frequently deadloops
+			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
 			while (self->descriptors_count < self->descriptors_available)
-				GST_INFO_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
+				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
 			if (self->descriptors_count)
-				write(self->encoder->fd, &self->descriptors_count, 4);
+				write(self->encoder->fd, &self->descriptors_count, sizeof(self->descriptors_count));
 			ret = ioctl(self->encoder->fd, AENC_STOP);
 			if ( ret != 0 )
 				goto fail;
@@ -492,7 +492,7 @@ gst_dreamaudiosource_start (GstBaseSrc * bsrc)
 	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
 	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
 
-	GST_DEBUG_OBJECT (self, "started. reference to dreamvideosource=%" GST_PTR_FORMAT"", self->dreamvideosrc);
+	GST_DEBUG_OBJECT (self, "started. reference to dreamvideosource=%" GST_PTR_FORMAT "", self->dreamvideosrc);
 	return TRUE;
 }
 
