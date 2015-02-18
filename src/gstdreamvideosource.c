@@ -26,6 +26,23 @@
 GST_DEBUG_CATEGORY_STATIC (dreamvideosource_debug);
 #define GST_CAT_DEFAULT dreamvideosource_debug
 
+GType gst_dreamvideosource_input_mode_get_type (void)
+{
+	static volatile gsize input_mode_type = 0;
+	static const GEnumValue input_mode[] = {
+		{GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE, "GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE", "live"},
+		{GST_DREAMVIDEOSOURCE_INPUT_MODE_HDMI_IN, "GST_DREAMVIDEOSOURCE_INPUT_MODE_HDMI_IN", "hdmi_in"},
+		{GST_DREAMVIDEOSOURCE_INPUT_MODE_BACKGROUND, "GST_DREAMVIDEOSOURCE_INPUT_MODE_BACKGROUND", "background"},
+		{0, NULL, NULL},
+	};
+
+	if (g_once_init_enter (&input_mode_type)) {
+		GType tmp = g_enum_register_static ("GstDreamVideoSourceInputMode", input_mode);
+		g_once_init_leave (&input_mode_type, tmp);
+	}
+	return (GType) input_mode_type;
+}
+
 enum
 {
 	SIGNAL_GET_BASE_PTS,
@@ -34,18 +51,19 @@ enum
 
 enum
 {
-  ARG_0,
-  ARG_CAPS,
-  ARG_BITRATE,
+	ARG_0,
+	ARG_CAPS,
+	ARG_BITRATE,
+	ARG_INPUT_MODE
 };
 
 static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 
-
-#define DEFAULT_BITRATE 2048
-#define DEFAULT_FRAMERATE 25
-#define DEFAULT_WIDTH 1280
-#define DEFAULT_HEIGHT 720
+#define DEFAULT_BITRATE    2048
+#define DEFAULT_FRAMERATE  25
+#define DEFAULT_WIDTH      1280
+#define DEFAULT_HEIGHT     720
+#define DEFAULT_INPUT_MODE GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -124,6 +142,12 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	  g_param_spec_boxed ("caps", "Caps",
 	    "The caps for the source stream", GST_TYPE_CAPS,
 	    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (gobject_class, ARG_INPUT_MODE,
+	  g_param_spec_enum ("input-mode", "Input Mode",
+		"Select the input source of the video stream",
+		GST_TYPE_DREAMVIDEOSOURCE_INPUT_MODE, DEFAULT_INPUT_MODE,
+		G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_dreamvideosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
@@ -231,6 +255,47 @@ fail:
 	return FALSE;
 }
 
+void gst_dreamvideosource_set_input_mode (GstDreamVideoSource *self, GstDreamVideoSourceInputMode mode)
+{
+	g_return_if_fail (GST_IS_DREAMVIDEOSOURCE (self));
+	GEnumValue *val = g_enum_get_value (G_ENUM_CLASS (g_type_class_ref (GST_TYPE_DREAMVIDEOSOURCE_INPUT_MODE)), mode);
+	if (!val)
+	{
+		GST_ERROR_OBJECT (self, "no such input_mode %i!", mode);
+		goto out;
+	}
+	const gchar *value_nick = val->value_nick;
+	GST_DEBUG_OBJECT (self, "setting input_mode to %s (%i)...", value_nick, mode);
+
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		GST_ERROR_OBJECT (self, "can't set input mode because encoder device not opened!");
+		goto out;
+	}
+	int int_mode = mode;
+	int ret = ioctl(self->encoder->fd, VENC_SET_SOURCE, &int_mode);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set input mode to %s (%i) error: %s", value_nick, mode, strerror(errno));
+		goto out;
+	}
+	GST_INFO_OBJECT (self, "successfully set input mode to %s (%i)", value_nick, mode);
+	self->input_mode = mode;
+out:
+	g_mutex_unlock (&self->mutex);
+	return;
+}
+
+GstDreamVideoSourceInputMode gst_dreamvideosource_get_input_mode (GstDreamVideoSource *self)
+{
+	GstDreamVideoSourceInputMode result;
+	g_return_val_if_fail (GST_IS_DREAMVIDEOSOURCE (self), -1);
+	GST_OBJECT_LOCK (self);
+	result =self->input_mode;
+	GST_OBJECT_UNLOCK (self);
+	return result;
+}
 
 gboolean
 gst_dreamvideosource_plugin_init (GstPlugin *plugin)
@@ -247,6 +312,7 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 
 	self->encoder = NULL;
 	self->descriptors_available = 0;
+	self->input_mode = DEFAULT_INPUT_MODE;
 
 	self->buffers_in_use = 0;
 
@@ -309,6 +375,9 @@ gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue
 		case ARG_BITRATE:
 			gst_dreamvideosource_set_bitrate(self, g_value_get_int (value));
 			break;
+		case ARG_INPUT_MODE:
+			gst_dreamvideosource_set_input_mode (self, g_value_get_enum (value));
+			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 			break;
@@ -326,6 +395,9 @@ gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * val
 			break;
 		case ARG_BITRATE:
 			g_value_set_int (value, self->video_info.bitrate/1000);
+			break;
+		case ARG_INPUT_MODE:
+			g_value_set_enum (value, gst_dreamvideosource_get_input_mode (self));
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -535,7 +607,7 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					if (self->base_pts == GST_CLOCK_TIME_NONE)
 					{
 						self->base_pts = MPEGTIME_TO_GSTTIME(desc->uiDTS);
-						GST_DEBUG_OBJECT (self, "use mpeg stream pts as base_pts=%" GST_TIME_FORMAT"", GST_TIME_ARGS (self->base_pts) );
+						GST_DEBUG_OBJECT (self, "use mpeg stream pts as base_pts=%" GST_TIME_FORMAT" (%lld)", GST_TIME_ARGS (self->base_pts), desc->uiDTS);
 					}
 				}
 			}
@@ -651,6 +723,10 @@ gst_dreamvideosource_stop (GstBaseSrc * bsrc)
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
 	if (self->dreamaudiosrc)
 		gst_object_unref(self->dreamaudiosrc);
+	close (READ_SOCKET (self));
+	close (WRITE_SOCKET (self));
+	READ_SOCKET (self) = -1;
+	WRITE_SOCKET (self) = -1;
 	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }

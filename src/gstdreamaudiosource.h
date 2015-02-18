@@ -43,6 +43,15 @@ struct _AudioFormatInfo {
 #define AENC_START        _IO('v', 128)
 #define AENC_STOP         _IO('v', 129)
 #define AENC_SET_BITRATE  _IOW('v', 130, unsigned int)
+#define AENC_SET_SOURCE   _IOW('v', 140, unsigned int)
+
+typedef enum aenc_source {
+        GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE = 0,
+        GST_DREAMAUDIOSOURCE_INPUT_MODE_HDMI_IN,
+        GST_DREAMAUDIOSOURCE_INPUT_MODE_BACKGROUND
+} GstDreamAudioSourceInputMode;
+
+#define GST_TYPE_DREAMAUDIOSOURCE_INPUT_MODE (gst_dreamaudiosource_input_mode_get_type ())
 
 #define GST_TYPE_DREAMAUDIOSOURCE \
   (gst_dreamaudiosource_get_type())
@@ -76,6 +85,8 @@ struct _GstDreamAudioSource
 
 	EncoderInfo *encoder;
 
+	GstDreamAudioSourceInputMode input_mode;
+
 	AudioFormatInfo audio_info;
 
 	unsigned int descriptors_available;
@@ -100,7 +111,11 @@ struct _GstDreamAudioSourceClass
 };
 
 GType gst_dreamaudiosource_get_type (void);
+GType gst_dreamaudiosource_input_mode_get_type (void);
 gboolean gst_dreamaudiosource_plugin_init (GstPlugin * plugin);
+
+void gst_dreamaudiosource_set_input_mode (GstDreamAudioSource *self, GstDreamAudioSourceInputMode mode);
+GstDreamAudioSourceInputMode gst_dreamaudiosource_get_input_mode (GstDreamAudioSource *self);
 
 G_END_DECLS
 

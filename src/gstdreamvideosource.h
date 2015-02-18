@@ -33,11 +33,12 @@ G_BEGIN_DECLS
 #define VBD_FLAG_DATA_UNIT_START           0x00020000
 #define VBD_FLAG_EXTENDED                  0x80000000
 
-#define VENC_START        _IO('v', 128)
-#define VENC_STOP         _IO('v', 129)
-#define VENC_SET_BITRATE  _IOW('v', 130, unsigned int)
+#define VENC_START          _IO('v', 128)
+#define VENC_STOP           _IO('v', 129)
+#define VENC_SET_BITRATE    _IOW('v', 130, unsigned int)
 #define VENC_SET_RESOLUTION _IOW('v', 131, unsigned int)
 #define VENC_SET_FRAMERATE  _IOW('v', 132, unsigned int)
+#define VENC_SET_SOURCE     _IOW('v', 140, unsigned int)
 
 enum venc_framerate {
         rate_custom = 0,
@@ -53,6 +54,15 @@ enum venc_videoformat {
         fmt_1280x720,
         fmt_1920x1080,
 };
+
+typedef enum venc_source {
+        GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE = 0,
+        GST_DREAMVIDEOSOURCE_INPUT_MODE_HDMI_IN,
+        GST_DREAMVIDEOSOURCE_INPUT_MODE_BACKGROUND
+} GstDreamVideoSourceInputMode;
+
+#define GST_TYPE_DREAMVIDEOSOURCE_INPUT_MODE (gst_dreamvideosource_input_mode_get_type ())
+
 struct _VideoBufferDescriptor
 {
 	CompressedBufferDescriptor stCommon;
@@ -100,6 +110,8 @@ struct _GstDreamVideoSource
 
 	EncoderInfo *encoder;
 
+	GstDreamVideoSourceInputMode input_mode;
+
 	VideoFormatInfo video_info;
 	GstCaps *current_caps;
 
@@ -124,7 +136,11 @@ struct _GstDreamVideoSourceClass
 };
 
 GType gst_dreamvideosource_get_type (void);
+GType gst_dreamvideosource_input_mode_get_type (void);
 gboolean gst_dreamvideosource_plugin_init (GstPlugin * plugin);
+
+void gst_dreamvideosource_set_input_mode (GstDreamVideoSource *self, GstDreamVideoSourceInputMode mode);
+GstDreamVideoSourceInputMode gst_dreamvideosource_get_input_mode (GstDreamVideoSource *self);
 
 G_END_DECLS
 

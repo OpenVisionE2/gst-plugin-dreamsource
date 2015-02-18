@@ -26,6 +26,23 @@
 GST_DEBUG_CATEGORY_STATIC (dreamaudiosource_debug);
 #define GST_CAT_DEFAULT dreamaudiosource_debug
 
+GType gst_dreamaudiosource_input_mode_get_type (void)
+{
+	static volatile gsize input_mode_type = 0;
+	static const GEnumValue input_mode[] = {
+		{GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE, "GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE", "live"},
+		{GST_DREAMAUDIOSOURCE_INPUT_MODE_HDMI_IN, "GST_DREAMAUDIOSOURCE_INPUT_MODE_HDMI_IN", "hdmi_in"},
+		{GST_DREAMAUDIOSOURCE_INPUT_MODE_BACKGROUND, "GST_DREAMAUDIOSOURCE_INPUT_MODE_BACKGROUND", "background"},
+		{0, NULL, NULL},
+	};
+
+	if (g_once_init_enter (&input_mode_type)) {
+		GType tmp = g_enum_register_static ("GstDreamAudioSourceInputMode", input_mode);
+		g_once_init_leave (&input_mode_type, tmp);
+	}
+	return (GType) input_mode_type;
+}
+
 enum
 {
 	SIGNAL_GET_BASE_PTS,
@@ -35,11 +52,13 @@ enum
 {
 	ARG_0,
 	ARG_BITRATE,
+	ARG_INPUT_MODE
 };
 
 static guint gst_dreamaudiosource_signals[LAST_SIGNAL] = { 0 };
 
-#define DEFAULT_BITRATE 128
+#define DEFAULT_BITRATE    128
+#define DEFAULT_INPUT_MODE GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -105,6 +124,12 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	    "Bitrate in kbit/sec", 16, 320, DEFAULT_BITRATE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+	g_object_class_install_property (gobject_class, ARG_INPUT_MODE,
+	  g_param_spec_enum ("input-mode", "Input Mode",
+		"Select the input source of the audio stream",
+		GST_TYPE_DREAMAUDIOSOURCE_INPUT_MODE, DEFAULT_INPUT_MODE,
+		G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
 	gst_dreamaudiosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
 		G_TYPE_FROM_CLASS (klass),
@@ -138,6 +163,47 @@ static void gst_dreamaudiosource_set_bitrate (GstDreamAudioSource * self, uint32
 	self->audio_info.bitrate = abr;
 }
 
+void gst_dreamaudiosource_set_input_mode (GstDreamAudioSource *self, GstDreamAudioSourceInputMode mode)
+{
+	g_return_if_fail (GST_IS_DREAMAUDIOSOURCE (self));
+	GEnumValue *val = g_enum_get_value (G_ENUM_CLASS (g_type_class_ref (GST_TYPE_DREAMAUDIOSOURCE_INPUT_MODE)), mode);
+	if (!val)
+	{
+		GST_ERROR_OBJECT (self, "no such input_mode %i!", mode);
+		goto out;
+	}
+	const gchar *value_nick = val->value_nick;
+	GST_DEBUG_OBJECT (self, "setting input_mode to %s (%i)...", value_nick, mode);
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		GST_ERROR_OBJECT (self, "can't set input mode because encoder device not opened!");
+		goto out;
+	}
+	int int_mode = mode;
+	int ret = ioctl(self->encoder->fd, AENC_SET_SOURCE, &int_mode);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set input mode to %s (%i) error: %s", value_nick, mode, strerror(errno));
+		goto out;
+	}
+	GST_INFO_OBJECT (self, "successfully set input mode to %s (%i)", value_nick, mode);
+	self->input_mode = mode;
+out:
+	g_mutex_unlock (&self->mutex);
+	return;
+}
+
+GstDreamAudioSourceInputMode gst_dreamaudiosource_get_input_mode (GstDreamAudioSource *self)
+{
+	GstDreamAudioSourceInputMode result;
+	g_return_val_if_fail (GST_IS_DREAMAUDIOSOURCE (self), -1);
+	GST_OBJECT_LOCK (self);
+	result =self->input_mode;
+	GST_OBJECT_UNLOCK (self);
+	return result;
+}
+
 gboolean
 gst_dreamaudiosource_plugin_init (GstPlugin *plugin)
 {
@@ -151,6 +217,7 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 	self->encoder = NULL;
 	self->buffers_list = NULL;
 	self->descriptors_available = 0;
+	self->input_mode = DEFAULT_INPUT_MODE;
 
 	g_mutex_init (&self->mutex);
 	READ_SOCKET (self) = -1;
@@ -206,6 +273,9 @@ gst_dreamaudiosource_set_property (GObject * object, guint prop_id, const GValue
 		case ARG_BITRATE:
 			gst_dreamaudiosource_set_bitrate(self, g_value_get_int (value));
 			break;
+		case ARG_INPUT_MODE:
+			     gst_dreamaudiosource_set_input_mode (self, g_value_get_enum (value));
+			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 			break;
@@ -220,6 +290,9 @@ gst_dreamaudiosource_get_property (GObject * object, guint prop_id, GValue * val
 	switch (prop_id) {
 		case ARG_BITRATE:
 			g_value_set_int (value, self->audio_info.bitrate/1000);
+			break;
+		case ARG_INPUT_MODE:
+			g_value_set_enum (value, gst_dreamaudiosource_get_input_mode (self));
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -394,6 +467,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					}
 				}
 				GstClockTime buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+				GST_INFO_OBJECT (self, "f & CDB_FLAG_PTS_VALID buffer_time=%" GST_TIME_FORMAT " condition?%i", GST_TIME_ARGS (buffer_time), buffer_time > self->base_pts);
 				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_time > self->base_pts )
 				{
 					buffer_time -= self->base_pts;
@@ -502,6 +576,10 @@ gst_dreamaudiosource_stop (GstBaseSrc * bsrc)
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
 	if (self->dreamvideosrc)
 		gst_object_unref(self->dreamvideosrc);
+	close (READ_SOCKET (self));
+	close (WRITE_SOCKET (self));
+	READ_SOCKET (self) = -1;
+	WRITE_SOCKET (self) = -1;
 	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }
