@@ -126,9 +126,9 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 
 	g_object_class_install_property (gobject_class, ARG_INPUT_MODE,
 	  g_param_spec_enum ("input-mode", "Input Mode",
-		"Select the input source of the audio stream",
-		GST_TYPE_DREAMAUDIOSOURCE_INPUT_MODE, DEFAULT_INPUT_MODE,
-		G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	    "Select the input source of the audio stream",
+	    GST_TYPE_DREAMAUDIOSOURCE_INPUT_MODE, DEFAULT_INPUT_MODE,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_dreamaudiosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",

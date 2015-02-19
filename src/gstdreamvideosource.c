@@ -145,9 +145,9 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 
 	g_object_class_install_property (gobject_class, ARG_INPUT_MODE,
 	  g_param_spec_enum ("input-mode", "Input Mode",
-		"Select the input source of the video stream",
-		GST_TYPE_DREAMVIDEOSOURCE_INPUT_MODE, DEFAULT_INPUT_MODE,
-		G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	    "Select the input source of the video stream",
+	    GST_TYPE_DREAMVIDEOSOURCE_INPUT_MODE, DEFAULT_INPUT_MODE,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_dreamvideosource_signals[SIGNAL_GET_BASE_PTS] =
 		g_signal_new ("get-base-pts",
