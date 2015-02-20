@@ -467,7 +467,6 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 					}
 				}
 				GstClockTime buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				GST_INFO_OBJECT (self, "f & CDB_FLAG_PTS_VALID buffer_time=%" GST_TIME_FORMAT " condition?%i", GST_TIME_ARGS (buffer_time), buffer_time > self->base_pts);
 				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_time > self->base_pts )
 				{
 					buffer_time -= self->base_pts;
