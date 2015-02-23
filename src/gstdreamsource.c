@@ -21,6 +21,7 @@
 #endif
 #include <gst/gst.h>
 
+#include "gstdreamsource.h"
 #include "gstdreamaudiosource.h"
 #include "gstdreamvideosource.h"
 #include "gstdreamtssource.h"
@@ -47,3 +48,76 @@ GST_PLUGIN_DEFINE (
 	"dreamsource",
 	"https://schwerkraft.elitedvb.net/scm/browser.php?group_id=10"
 )
+
+GST_DEBUG_CATEGORY_STATIC (dreamsourceclock_debug);
+#define GST_CAT_DEFAULT dreamsourceclock_debug
+
+G_DEFINE_TYPE (GstDreamSourceClock, gst_dreamsource_clock, GST_TYPE_SYSTEM_CLOCK);
+
+static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock);
+
+static void
+gst_dreamsource_clock_class_init (GstDreamSourceClockClass * klass)
+{
+	GstClockClass *clock_class = (GstClockClass *) klass;
+
+	clock_class->get_internal_time = gst_dreamsource_clock_get_internal_time;
+}
+
+static void
+gst_dreamsource_clock_init (GstDreamSourceClock * self)
+{
+	GST_DEBUG_CATEGORY_INIT (dreamsourceclock_debug, "dreamsourceclock", 0, "dreamsourceclock");
+	self->fd = 0;
+	self->stc_offset = 0;
+	self->first_stc = 0;
+	self->prev_stc = 0;
+	GST_OBJECT_FLAG_SET (self, GST_CLOCK_FLAG_CAN_SET_MASTER);
+}
+
+GstClock *
+gst_dreamsource_clock_new (const gchar * name, int fd)
+{
+	GstDreamSourceClock *self = GST_DREAMSOURCE_CLOCK (g_object_new (GST_TYPE_DREAMSOURCE_CLOCK, "name", name, "clock-type", GST_CLOCK_TYPE_OTHER, NULL));
+	self->fd = fd;
+	GST_INFO_OBJECT (self, "gst_dreamsource_clock_new fd=%i", self->fd);
+	return GST_CLOCK_CAST (self);
+}
+
+static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
+{
+	GstDreamSourceClock *self = GST_DREAMSOURCE_CLOCK (clock);
+
+	uint32_t stc;
+	GstClockTime encoder_time = 0;
+
+	if (self->fd > 0) {
+		int ret = ioctl(self->fd, ENC_GET_STC, &stc);
+		if (ret == 0)
+		{
+			if (G_UNLIKELY(self->first_stc == 0))
+				self->first_stc = stc;
+
+			stc -= self->first_stc;
+
+			if (stc < self->prev_stc)
+			{
+				self->stc_offset += UINT32_MAX;
+				GST_DEBUG_OBJECT (self, "clock_wrap! new offset=%" PRIu64 " ", self->stc_offset);
+			}
+
+			self->prev_stc = stc;
+
+			uint64_t total_stc = stc + self->stc_offset;
+// 			GST_WARNING_OBJECT (self, "after subtract stc_offset=%" PRIu64 "   new total_stc=%" PRIu64 "", self->stc_offset, total_stc);
+			encoder_time = ENCTIME_TO_GSTTIME(total_stc);
+			GST_INFO_OBJECT (self, "result %" GST_TIME_FORMAT "", GST_TIME_ARGS(encoder_time));
+		}
+		else
+			GST_WARNING_OBJECT (self, "can't ENC_GET_STC error: %s, fd=%i, ret=%i", strerror(errno), self->fd, ret);
+	}
+	else
+		GST_ERROR_OBJECT (self, "timebase not available because encoder device is not opened");
+
+	return encoder_time;
+}

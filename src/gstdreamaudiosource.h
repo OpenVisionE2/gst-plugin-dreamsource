@@ -20,7 +20,6 @@
 #define __GST_DREAMAUDIOSOURCE_H__
 
 #include "gstdreamsource.h"
-#include <gst/audio/audio.h>
 
 G_BEGIN_DECLS
 
@@ -44,6 +43,7 @@ struct _AudioFormatInfo {
 #define AENC_STOP         _IO('v', 129)
 #define AENC_SET_BITRATE  _IOW('v', 130, unsigned int)
 #define AENC_SET_SOURCE   _IOW('v', 140, unsigned int)
+#define AENC_GET_STC      _IOR('v', 141, uint32_t)
 
 typedef enum aenc_source {
         GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE = 0,
@@ -71,6 +71,7 @@ typedef struct _AudioFormatInfo            AudioFormatInfo;
 typedef struct _AudioBufferDescriptor      AudioBufferDescriptor;
 
 // #define dump 1
+#define PROVIDE_CLOCK
 
 struct _bufferdebug
 {
@@ -102,6 +103,8 @@ struct _GstDreamAudioSource
 	int control_sock[2];
 
 	GList *buffers_list;
+
+	GstClock *encoder_clock;
 };
 
 struct _GstDreamAudioSourceClass

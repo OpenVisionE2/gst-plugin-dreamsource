@@ -72,7 +72,7 @@ static GstStaticPadTemplate srctemplate =
 #define gst_dreamaudiosource_parent_class parent_class
 G_DEFINE_TYPE (GstDreamAudioSource, gst_dreamaudiosource, GST_TYPE_PUSH_SRC);
 
-static GstCaps *gst_dreamaudiosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
+static GstCaps *gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter);
 static gboolean gst_dreamaudiosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamaudiosource_stop (GstBaseSrc * bsrc);
 static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc);
@@ -84,6 +84,11 @@ static void gst_dreamaudiosource_get_property (GObject * object, guint prop_id, 
 
 static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * element, GstStateChange transition);
 static gint64 gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self);
+
+#ifdef PROVIDE_CLOCK
+static GstClock *gst_dreamaudiosource_provide_clock (GstElement * elem);
+// static GstClockTime gst_dreamaudiosource_get_encoder_time_ (GstClock * clock, GstBaseSrc * bsrc);
+#endif
 
 static void
 gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
@@ -118,6 +123,11 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	gstbasesrc_class->unlock = gst_dreamaudiosource_unlock;
 
 	gstpush_src_class->create = gst_dreamaudiosource_create;
+
+#ifdef PROVIDE_CLOCK
+	gstelement_class->provide_clock = GST_DEBUG_FUNCPTR (gst_dreamaudiosource_provide_clock);
+// 	g_type_class_ref (GST_TYPE_SYSTEM_CLOCK);
+#endif
 
 	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BITRATE,
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
@@ -257,6 +267,11 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 		GST_ERROR_OBJECT(self,"cannot mmap cdb: %s (%d)", strerror(errno));
 		return;
 	}
+
+#ifdef PROVIDE_CLOCK
+	self->encoder_clock = gst_dreamsource_clock_new ("GstDreamAudioSourceClock", self->encoder->fd);
+	GST_OBJECT_FLAG_SET (self, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
+#endif
 
 #ifdef dump
 	self->dumpfd = open("/media/hdd/movie/dreamaudiosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
@@ -515,6 +530,12 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 	int ret;
 	GST_OBJECT_LOCK (self);
 	switch (transition) {
+		case GST_STATE_CHANGE_READY_TO_PAUSED:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_READY_TO_PAUSED");
+#ifdef PROVIDE_CLOCK
+			gst_element_post_message (element, gst_message_new_clock_provide (GST_OBJECT_CAST (element), self->encoder_clock, TRUE));
+#endif
+			break;
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
 			self->base_pts = GST_CLOCK_TIME_NONE;
@@ -525,23 +546,40 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 			CLEAR_COMMAND (self);
 			GST_INFO_OBJECT (self, "started encoder!");
 			break;
-		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
-			while (self->descriptors_count < self->descriptors_available)
-				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
-			if (self->descriptors_count)
-				write(self->encoder->fd, &self->descriptors_count, sizeof(self->descriptors_count));
-			ret = ioctl(self->encoder->fd, AENC_STOP);
-			if ( ret != 0 )
-				goto fail;
-			GST_INFO_OBJECT (self, "stopped encoder!");
-			break;
 		default:
 			break;
 	}
 	GST_OBJECT_UNLOCK (self);
 	if (GST_ELEMENT_CLASS (parent_class)->change_state)
 		sret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+
+	switch (transition) {
+		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
+			while (self->descriptors_count < self->descriptors_available)
+			{
+				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i");
+				self->descriptors_count++;
+			}
+			if (self->descriptors_count)
+				write(self->encoder->fd, &self->descriptors_count, sizeof(self->descriptors_count));
+			ret = ioctl(self->encoder->fd, AENC_STOP);
+			if ( ret != 0 )
+				goto fail;
+#ifdef PROVIDE_CLOCK
+			gst_clock_set_master (self->encoder_clock, NULL);
+#endif
+			GST_INFO_OBJECT (self, "stopped encoder!");
+			break;
+		case GST_STATE_CHANGE_PAUSED_TO_READY:
+			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_PAUSED_TO_READY");
+#ifdef PROVIDE_CLOCK
+			gst_element_post_message (element, gst_message_new_clock_lost (GST_OBJECT_CAST (element), self->encoder_clock));
+#endif
+			break;
+		default:
+			break;
+	}
 	return sret;
 fail:
 	GST_ERROR_OBJECT(self,"can't perform encoder ioctl!");
@@ -597,6 +635,12 @@ gst_dreamaudiosource_dispose (GObject * gobject)
 			close(self->encoder->fd);
 		free(self->encoder);
 	}
+#ifdef PROVIDE_CLOCK
+	if (self->encoder_clock) {
+		gst_object_unref (self->encoder_clock);
+		self->encoder_clock = NULL;
+	}
+#endif
 #ifdef dump
 	close(self->dumpfd);
 #endif
@@ -605,3 +649,20 @@ gst_dreamaudiosource_dispose (GObject * gobject)
 	GST_DEBUG_OBJECT (self, "disposed");
 	G_OBJECT_CLASS (parent_class)->dispose (gobject);
 }
+
+#ifdef PROVIDE_CLOCK
+static GstClock *gst_dreamaudiosource_provide_clock (GstElement * element)
+{
+	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (element);
+
+	if (!self->encoder || self->encoder->fd < 0)
+	{
+		GST_DEBUG_OBJECT (self, "encoder device not started, can't provide clock!");
+		return NULL;
+	}
+
+	return GST_CLOCK_CAST (gst_object_ref (self->encoder_clock));
+}
+
+#endif
+

@@ -59,11 +59,12 @@ enum
 
 static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 
-#define DEFAULT_BITRATE    2048
-#define DEFAULT_FRAMERATE  25
-#define DEFAULT_WIDTH      1280
-#define DEFAULT_HEIGHT     720
-#define DEFAULT_INPUT_MODE GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
+#define DEFAULT_BITRATE     2048
+#define DEFAULT_FRAMERATE   25
+#define DEFAULT_WIDTH       1280
+#define DEFAULT_HEIGHT      720
+#define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
+#define DEFAULT_BUFFER_SIZE 16
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -81,13 +82,14 @@ static GstStaticPadTemplate srctemplate =
 #define gst_dreamvideosource_parent_class parent_class
 G_DEFINE_TYPE (GstDreamVideoSource, gst_dreamvideosource, GST_TYPE_PUSH_SRC);
 
-static GstCaps *gst_dreamvideosource_getcaps (GstBaseSrc * psrc, GstCaps * filter);
+static GstCaps *gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter);
 static gboolean gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps);
 static GstCaps *gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps);
 
 static gboolean gst_dreamvideosource_start (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_stop (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_unlock (GstBaseSrc * bsrc);
+static gboolean gst_dreamvideosource_unlock_stop (GstBaseSrc * bsrc);
 static void gst_dreamvideosource_dispose (GObject * gobject);
 static GstFlowReturn gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf);
 
@@ -96,6 +98,13 @@ static void gst_dreamvideosource_get_property (GObject * object, guint prop_id, 
 
 static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition);
 static gint64 gst_dreamvideosource_get_base_pts (GstDreamVideoSource *self);
+
+static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self);
+
+#ifdef PROVIDE_CLOCK
+static GstClock *gst_dreamvideosource_provide_clock (GstElement * elem);
+// static GstClockTime gst_dreamvideosource_get_encoder_time_ (GstClock * clock, GstBaseSrc * bsrc);
+#endif
 
 static void
 gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
@@ -130,8 +139,14 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	gstbsrc_class->start = gst_dreamvideosource_start;
 	gstbsrc_class->stop = gst_dreamvideosource_stop;
 	gstbsrc_class->unlock = gst_dreamvideosource_unlock;
+	gstbsrc_class->unlock_stop = gst_dreamvideosource_unlock_stop;
 
 	gstpush_src_class->create = gst_dreamvideosource_create;
+
+#ifdef PROVIDE_CLOCK
+	gstelement_class->provide_clock = GST_DEBUG_FUNCPTR (gst_dreamvideosource_provide_clock);
+// 	g_type_class_ref (GST_TYPE_SYSTEM_CLOCK);
+#endif
 
 	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BITRATE,
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
@@ -192,7 +207,7 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 		return FALSE;
 	}
 
-	GST_OBJECT_LOCK (self);
+	g_mutex_lock (&self->mutex);
 
 	if (info->fps_n > 0)
 	{
@@ -247,11 +262,11 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 	}
 
 	self->video_info = *info;
-	GST_OBJECT_UNLOCK (self);
+	g_mutex_unlock (&self->mutex);
 	return TRUE;
 
 fail:
-	GST_OBJECT_UNLOCK (self);
+	g_mutex_unlock (&self->mutex);
 	return FALSE;
 }
 
@@ -291,9 +306,9 @@ GstDreamVideoSourceInputMode gst_dreamvideosource_get_input_mode (GstDreamVideoS
 {
 	GstDreamVideoSourceInputMode result;
 	g_return_val_if_fail (GST_IS_DREAMVIDEOSOURCE (self), -1);
-	GST_OBJECT_LOCK (self);
+	g_mutex_lock (&self->mutex);
 	result =self->input_mode;
-	GST_OBJECT_UNLOCK (self);
+	g_mutex_unlock (&self->mutex);
 	return result;
 }
 
@@ -314,9 +329,12 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	self->descriptors_available = 0;
 	self->input_mode = DEFAULT_INPUT_MODE;
 
-	self->buffers_in_use = 0;
+	self->buffer_size = DEFAULT_BUFFER_SIZE;
+	g_queue_init (&self->current_frames);
+	self->readthread = NULL;
 
 	g_mutex_init (&self->mutex);
+	g_cond_init (&self->cond);
 	READ_SOCKET (self) = -1;
 	WRITE_SOCKET (self) = -1;
 
@@ -352,6 +370,11 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 		GST_ERROR_OBJECT(self,"cannot mmap cdb");
 		return;
 	}
+
+#ifdef PROVIDE_CLOCK
+	self->encoder_clock = gst_dreamsource_clock_new ("GstDreamVideoSinkClock", self->encoder->fd);
+	GST_OBJECT_FLAG_SET (self, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
+#endif
 
 #ifdef dump
 	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
@@ -498,82 +521,120 @@ static gboolean gst_dreamvideosource_unlock (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
 	GST_DEBUG_OBJECT (self, "stop creating buffers");
-	SEND_COMMAND (self, CONTROL_STOP);
+	g_mutex_lock (&self->mutex);
+	self->flushing = TRUE;
+	GST_DEBUG_OBJECT (self, "set flushing TRUE");
+	g_cond_signal (&self->cond);
+	g_mutex_unlock (&self->mutex);
 	return TRUE;
 }
 
-static void
-gst_dreamvideosource_free_buffer (GstDreamVideoSource * self)
+static gboolean gst_dreamvideosource_unlock_stop (GstBaseSrc * bsrc)
 {
-	self->buffers_in_use--;
-	GST_TRACE_OBJECT (self, "gst_dreamvideosource_free_buffer buffer still in use: %i", self->buffers_in_use);
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
+	GST_DEBUG_OBJECT (self, "start creating buffers...");
+	g_mutex_lock (&self->mutex);
+	self->flushing = FALSE;
+	g_queue_foreach (&self->current_frames, (GFunc) gst_buffer_unref, NULL);
+	g_queue_clear (&self->current_frames);
+	g_mutex_unlock (&self->mutex);
+	return TRUE;
 }
 
-static GstFlowReturn
-gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
+static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 {
-	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (psrc);
 	EncoderInfo *enc = self->encoder;
-
-	GST_LOG_OBJECT (self, "new buffer requested");
+	GstBuffer *readbuf;
 
 	if (!enc) {
 		GST_WARNING_OBJECT (self, "encoder device not opened!");
-		return GST_FLOW_ERROR;
+		return;
 	}
 
-	while (1)
-	{
-		*outbuf = NULL;
+	GST_DEBUG_OBJECT (self, "enter read thread");
 
-		if (self->descriptors_available == 0)
+	GstMessage *message;
+	GValue val = { 0 };
+
+	message = gst_message_new_stream_status (GST_OBJECT_CAST (self), GST_STREAM_STATUS_TYPE_ENTER, GST_ELEMENT_CAST (GST_OBJECT_PARENT(self)));
+	g_value_init (&val, GST_TYPE_G_THREAD);
+	g_value_set_boxed (&val, self->readthread);
+	gst_message_set_stream_status_object (message, &val);
+	g_value_unset (&val);
+	GST_DEBUG_OBJECT (self, "posting ENTER stream status");
+	gst_element_post_message (GST_ELEMENT_CAST (self), message);
+
+	while (TRUE) {
+		readbuf = NULL;
 		{
-			self->descriptors_count = 0;
 			struct pollfd rfd[2];
+			int timeout, nfds;
 
-			rfd[0].fd = enc->fd;
-			rfd[0].events = POLLIN;
-			rfd[1].fd = READ_SOCKET (self);
-			rfd[1].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
+			rfd[0].fd = READ_SOCKET (self);
+			rfd[0].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
 
-			int ret = poll(rfd, 2, 200);
+			if (self->descriptors_available == 0)
+			{
+				rfd[1].fd = enc->fd;
+				rfd[1].events = POLLIN;
+				self->descriptors_count = 0;
+				timeout = 200;
+				nfds = 2;
+			}
+			else
+			{
+				rfd[1].revents = 0;
+				nfds = 1;
+				timeout = 0;
+			}
+
+			int ret = poll(rfd, nfds, timeout);
 
 			if (G_UNLIKELY (ret == -1))
 			{
 				GST_ERROR_OBJECT (self, "SELECT ERROR!");
-				return GST_FLOW_ERROR;
+				goto stop_running;
 			}
-			else if ( ret == 0 )
+			else if ( ret == 0 && self->descriptors_available == 0 )
 			{
-				GST_LOG_OBJECT (self, "SELECT TIMEOUT");
-				//!!! TODO generate dummy payload
-				*outbuf = gst_buffer_new();
+				g_mutex_lock (&self->mutex);
+				if (self->flushing)
+				{
+					GST_DEBUG_OBJECT (self, "FLUSHING!");
+					g_cond_signal (&self->cond);
+					continue;
+				}
+				g_mutex_unlock (&self->mutex);
+				GST_DEBUG_OBJECT (self, "SELECT TIMEOUT");
+				//!!! TODO generate valid dummy payload
+				readbuf = gst_buffer_new();
 			}
-			else if ( G_UNLIKELY (rfd[1].revents) )
+			else if ( rfd[0].revents )
 			{
 				char command;
 				READ_COMMAND (self, command, ret);
 				if (command == CONTROL_STOP)
 				{
-					GST_LOG_OBJECT (self, "CONTROL_STOP!");
-					return GST_FLOW_FLUSHING;
+					GST_DEBUG_OBJECT (self, "CONTROL_STOP!");
+					goto stop_running;
 				}
 			}
-			else if ( G_LIKELY(rfd[0].revents & POLLIN) )
+			else if ( G_LIKELY(rfd[1].revents & POLLIN) )
 			{
 				int rlen = read(enc->fd, enc->buffer, VBUFSIZE);
 				if (rlen <= 0 || rlen % VBDSIZE ) {
 					if ( errno == 512 )
-						return GST_FLOW_FLUSHING;
+						goto stop_running;
 					GST_WARNING_OBJECT (self, "read error %s (%i)", strerror(errno), errno);
-					return GST_FLOW_ERROR;
+					goto stop_running;
 				}
 				self->descriptors_available = rlen / VBDSIZE;
 				GST_LOG_OBJECT (self, "encoder buffer was empty, %d descriptors available", self->descriptors_available);
 			}
 		}
 
-		while (self->descriptors_count < self->descriptors_available) {
+		while (self->descriptors_count < self->descriptors_available)
+		{
 			off_t offset = self->descriptors_count * VBDSIZE;
 			VideoBufferDescriptor *desc = (VideoBufferDescriptor*)(&enc->buffer[offset]);
 
@@ -590,11 +651,11 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 			if (f & VBD_FLAG_DTS_VALID && desc->uiDTS)
 			{
+				g_mutex_lock (&self->mutex);
 				if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
 				{
 					if (self->dreamaudiosrc)
 					{
-						g_mutex_lock (&self->mutex);
 						guint64 audiosource_base_pts;
 						g_signal_emit_by_name(self->dreamaudiosrc, "get-base-pts", &audiosource_base_pts);
 						if (audiosource_base_pts != GST_CLOCK_TIME_NONE)
@@ -602,7 +663,6 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 							GST_DEBUG_OBJECT (self, "use DREAMAUDIOSOURCE's base_pts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (audiosource_base_pts) );
 							self->base_pts = audiosource_base_pts;
 						}
-						g_mutex_unlock (&self->mutex);
 					}
 					if (self->base_pts == GST_CLOCK_TIME_NONE)
 					{
@@ -610,49 +670,146 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 						GST_DEBUG_OBJECT (self, "use mpeg stream pts as base_pts=%" GST_TIME_FORMAT" (%lld)", GST_TIME_ARGS (self->base_pts), desc->uiDTS);
 					}
 				}
+				g_mutex_unlock (&self->mutex);
 			}
 
-			*outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, VMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, (GDestroyNotify)gst_dreamvideosource_free_buffer);
+			if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
+			{
+				GST_DEBUG_OBJECT (self, "self->base_pts == GST_CLOCK_TIME_NONE! skip this frame");
+				self->descriptors_count++;
+				break;
+			}
+
+			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, VMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, NULL);
+
+			GstClockTime buffer_time = GST_CLOCK_TIME_NONE;
+
+
+			if (self->video_info.fps_d)
+				GST_BUFFER_DURATION(readbuf) = gst_util_uint64_scale (GST_SECOND, self->video_info.fps_d, self->video_info.fps_n);
 
 			if (f & CDB_FLAG_PTS_VALID)
 			{
-				GstClockTime buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_time > self->base_pts )
+				GstClock *clock = gst_element_get_clock (GST_ELEMENT(self));
+				if (clock)
 				{
-					buffer_time -= self->base_pts;
-					GST_BUFFER_PTS(*outbuf) = buffer_time;
-					GST_BUFFER_DTS(*outbuf) = buffer_time;
+					GstClockTime clock_time, base_time;
+					clock_time = gst_clock_get_time (clock);
+					base_time = gst_element_get_base_time (GST_ELEMENT(self));
+GST_ERROR_OBJECT (self, "\n%" GST_TIME_FORMAT "=mpeg pts\n%" GST_TIME_FORMAT "=dreamsource_clock_time\n%" GST_TIME_FORMAT "=base_time\n%" GST_TIME_FORMAT "=base_pts",
+GST_TIME_ARGS (MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS)), GST_TIME_ARGS (clock_time), GST_TIME_ARGS (base_time), GST_TIME_ARGS(self->base_pts) );
+
+					if (clock_time && clock_time > base_time)
+					{
+						buffer_time = clock_time - base_time;
+						gst_object_unref (clock);
+	// 					buffer_time -= GST_BUFFER_DURATION(readbuf);
+						GST_BUFFER_PTS(readbuf) = buffer_time;
+						GST_BUFFER_DTS(readbuf) = buffer_time;
+
+					}
+					else
+						buffer_time = GST_CLOCK_TIME_NONE;
 				}
 			}
+
+
+
+			if (/*(!clock || buffer_time == GST_CLOCK_TIME_NONE) && */f & CDB_FLAG_PTS_VALID)
+			{
+				buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+				GST_INFO_OBJECT (self, "pts/dts by mpeg pts =%" GST_TIME_FORMAT " (result %" GST_TIME_FORMAT")", GST_TIME_ARGS (buffer_time), GST_TIME_ARGS (buffer_time-self->base_pts));
+				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_time >= self->base_pts )
+				{
+					buffer_time -= self->base_pts/* + GST_BUFFER_DURATION(readbuf)*/;
+					GST_BUFFER_PTS(readbuf) = buffer_time;
+					GST_BUFFER_DTS(readbuf) = buffer_time;
+					GST_INFO_OBJECT (self, "currected pts =%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS(readbuf)));
+				}
+			}
+			
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
 			GST_LOG_OBJECT (self, "read %i dumped %i total %" G_GSIZE_FORMAT " ", desc->stCommon.uiLength, wret, gst_buffer_get_size (*outbuf) );
 #endif
-
 			self->descriptors_count++;
-
 			break;
 		}
 
-		if (self->descriptors_count == self->descriptors_available) {
+		if (self->descriptors_count == self->descriptors_available)
+		{
 			GST_LOG_OBJECT (self, "self->descriptors_count == self->descriptors_available -> release %i consumed descriptors", self->descriptors_count);
 			/* release consumed descs */
 			if (write(enc->fd, &self->descriptors_count, sizeof(self->descriptors_count)) != sizeof(self->descriptors_count)) {
 				GST_WARNING_OBJECT (self, "release consumed descs write error!");
-				return GST_FLOW_ERROR;
+				goto stop_running;
 			}
 			self->descriptors_available = 0;
 		}
 
-		if (*outbuf)
+		if (readbuf)
 		{
-			self->buffers_in_use++;
-			GST_DEBUG_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
-			return GST_FLOW_OK;
+			g_mutex_lock (&self->mutex);
+			if (!self->flushing)
+			{
+				while (g_queue_get_length (&self->current_frames) >= self->buffer_size)
+				{
+					GstBuffer * oldbuf = g_queue_pop_head (&self->current_frames);
+					GST_WARNING_OBJECT (self, "dropping %" GST_PTR_FORMAT " because of queue overflow! buffers count=%i", oldbuf, g_queue_get_length (&self->current_frames));
+					gst_buffer_unref(oldbuf);
+				}
+				g_queue_push_tail (&self->current_frames, readbuf);
+			}
+			g_cond_signal (&self->cond);
+			GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
+			g_mutex_unlock (&self->mutex);
 		}
-
 	}
-	return GST_FLOW_ERROR;
+
+	g_assert_not_reached ();
+	return;
+
+	stop_running:
+	{
+		g_mutex_unlock (&self->mutex);
+		g_cond_signal (&self->cond);
+		GST_DEBUG ("stop running, exit thread");
+		message = gst_message_new_stream_status (GST_OBJECT_CAST (self), GST_STREAM_STATUS_TYPE_ENTER, GST_ELEMENT_CAST (GST_OBJECT_PARENT(self)));
+		g_value_init (&val, GST_TYPE_G_THREAD);
+		g_value_set_boxed (&val, self->readthread);
+		gst_message_set_stream_status_object (message, &val);
+		g_value_unset (&val);
+		GST_DEBUG_OBJECT (self, "posting LEAVE stream status");
+		gst_element_post_message (GST_ELEMENT_CAST (self), message);
+		return;
+	}
+}
+
+static GstFlowReturn
+gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
+{
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (psrc);
+
+	GST_LOG_OBJECT (self, "new buffer requested");
+
+	g_mutex_lock (&self->mutex);
+	while (g_queue_is_empty (&self->current_frames) && !self->flushing)
+	{
+		g_cond_wait (&self->cond, &self->mutex);
+		GST_INFO_OBJECT (self, "waiting for buffer from encoder");
+	}
+
+	*outbuf = g_queue_pop_head (&self->current_frames);
+	g_mutex_unlock (&self->mutex);
+
+	if (*outbuf)
+	{
+		GST_INFO_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
+		return GST_FLOW_OK;
+	}
+	GST_INFO_OBJECT (self, "FLUSHING");
+	return GST_FLOW_FLUSHING;
+
 }
 
 static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition)
@@ -660,9 +817,37 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (element);
 	GstStateChangeReturn sret = GST_STATE_CHANGE_SUCCESS;
 	int ret;
-	GST_OBJECT_LOCK (self);
+
 	switch (transition) {
+		case GST_STATE_CHANGE_NULL_TO_READY:
+		{
+			int control_sock[2];
+			if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
+			{
+				GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE, (NULL), GST_ERROR_SYSTEM);
+				return GST_STATE_CHANGE_FAILURE;
+			}
+			READ_SOCKET (self) = control_sock[0];
+			WRITE_SOCKET (self) = control_sock[1];
+			fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
+			fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
+			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_NULL_TO_READY");
+			break;
+		}
+		case GST_STATE_CHANGE_READY_TO_PAUSED:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_READY_TO_PAUSED");
+#ifdef PROVIDE_CLOCK
+			GstMessage* msg;
+			msg = gst_message_new_clock_provide (GST_OBJECT_CAST (element), self->encoder_clock, TRUE);
+			GST_INFO_OBJECT (self, "clock: %" GST_PTR_FORMAT " %" GST_PTR_FORMAT " typename=%s", self->encoder_clock, msg, GST_MESSAGE_TYPE_NAME(msg));
+			gst_element_post_message (element, msg);
+#endif
+			self->flushing = TRUE;
+			self->readthread = g_thread_try_new ("dreamvideosrc-read", (GThreadFunc) gst_dreamvideosource_read_thread_func, self, NULL);
+			GST_DEBUG_OBJECT (self, "started readthread @%p", self->readthread );
+			break;
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+			g_mutex_lock (&self->mutex);
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
 			self->base_pts = GST_CLOCK_TIME_NONE;
 			ret = ioctl(self->encoder->fd, VENC_START);
@@ -671,28 +856,61 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			self->descriptors_available = 0;
 			CLEAR_COMMAND (self);
 			GST_INFO_OBJECT (self, "started encoder!");
+			g_mutex_unlock (&self->mutex);
 			break;
+		default:
+			break;
+	}
+
+	if (GST_ELEMENT_CLASS (parent_class)->change_state)
+		sret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+
+	switch (transition) {
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_READY_TO_PAUSED");
+			g_mutex_lock (&self->mutex);
+			self->flushing = TRUE;
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
 			while (self->descriptors_count < self->descriptors_available)
-				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i", self->descriptors_count++);
+			{
+				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i");
+				self->descriptors_count++;
+			}
 			if (self->descriptors_count)
 				write(self->encoder->fd, &self->descriptors_count, sizeof(self->descriptors_count));
 			ret = ioctl(self->encoder->fd, VENC_STOP);
 			if ( ret != 0 )
 				goto fail;
+#ifdef PROVIDE_CLOCK
+			gst_clock_set_master (self->encoder_clock, NULL);
+#endif
 			GST_INFO_OBJECT (self, "stopped encoder!");
+			g_mutex_unlock (&self->mutex);
+			break;
+		case GST_STATE_CHANGE_PAUSED_TO_READY:
+			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_PAUSED_TO_READY");
+#ifdef PROVIDE_CLOCK
+			gst_element_post_message (element, gst_message_new_clock_lost (GST_OBJECT_CAST (element), self->encoder_clock));
+#endif
+			GST_DEBUG_OBJECT (self, "stopping readthread @%p...", self->readthread);
+			SEND_COMMAND (self, CONTROL_STOP);
+			g_thread_join (self->readthread);
+			break;
+		case GST_STATE_CHANGE_READY_TO_NULL:
+			close (READ_SOCKET (self));
+			close (WRITE_SOCKET (self));
+			READ_SOCKET (self) = -1;
+			WRITE_SOCKET (self) = -1;
+			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_READY_TO_NULL, close control sockets");
 			break;
 		default:
 			break;
 	}
-	GST_OBJECT_UNLOCK (self);
-	if (GST_ELEMENT_CLASS (parent_class)->change_state)
-		sret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+
 	return sret;
 fail:
 	GST_ERROR_OBJECT(self,"can't perform encoder ioctl!");
-	GST_OBJECT_UNLOCK (self);
+	g_mutex_unlock (&self->mutex);
 	return GST_STATE_CHANGE_FAILURE;
 }
 
@@ -701,18 +919,6 @@ gst_dreamvideosource_start (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
 	self->dreamaudiosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamaudiosource0");
-
-	int control_sock[2];
-	if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
-	{
-		GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE, (NULL), GST_ERROR_SYSTEM);
-		return FALSE;
-	}
-	READ_SOCKET (self) = control_sock[0];
-	WRITE_SOCKET (self) = control_sock[1];
-	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
-	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
-
 	GST_DEBUG_OBJECT (self, "started. reference to dreamaudiosource=%" GST_PTR_FORMAT"", self->dreamaudiosrc);
 	return TRUE;
 }
@@ -723,10 +929,6 @@ gst_dreamvideosource_stop (GstBaseSrc * bsrc)
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
 	if (self->dreamaudiosrc)
 		gst_object_unref(self->dreamaudiosrc);
-	close (READ_SOCKET (self));
-	close (WRITE_SOCKET (self));
-	READ_SOCKET (self) = -1;
-	WRITE_SOCKET (self) = -1;
 	GST_DEBUG_OBJECT (self, "stop");
 	return TRUE;
 }
@@ -744,12 +946,34 @@ gst_dreamvideosource_dispose (GObject * gobject)
 			close(self->encoder->fd);
 		free(self->encoder);
 	}
+#ifdef PROVIDE_CLOCK
+	if (self->encoder_clock) {
+		gst_object_unref (self->encoder_clock);
+		self->encoder_clock = NULL;
+	}
+#endif
 #ifdef dump
 	close(self->dumpfd);
 #endif
 	if (self->current_caps)
 		gst_caps_unref(self->current_caps);
 	g_mutex_clear (&self->mutex);
+	g_cond_clear (&self->cond);
 	GST_DEBUG_OBJECT (self, "disposed");
 	G_OBJECT_CLASS (parent_class)->dispose (gobject);
 }
+
+#ifdef PROVIDE_CLOCK
+static GstClock *gst_dreamvideosource_provide_clock (GstElement * element)
+{
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (element);
+
+	if (!self->encoder || self->encoder->fd < 0)
+	{
+		GST_DEBUG_OBJECT (self, "encoder device not started, can't provide clock!");
+		return NULL;
+	}
+
+	return GST_CLOCK_CAST (gst_object_ref (self->encoder_clock));
+}
+#endif

@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -63,7 +64,8 @@ G_BEGIN_DECLS
 typedef struct _CompressedBufferDescriptor CompressedBufferDescriptor;
 typedef struct _EncoderInfo                EncoderInfo;
 
-#define MPEGTIME_TO_GSTTIME(time) (gst_util_uint64_scale ((time), GST_MSECOND/10, 9LL))
+#define ENCTIME_TO_GSTTIME(time)           (gst_util_uint64_scale ((time), GST_USECOND, 27LL))
+#define MPEGTIME_TO_GSTTIME(time)          (gst_util_uint64_scale ((time), GST_MSECOND/10, 9LL))
 
 /* validity flags */
 #define CDB_FLAG_ORIGINALPTS_VALID         0x00000001
@@ -113,6 +115,42 @@ struct _EncoderInfo {
 	/* mmapp'ed data buffer */
 	unsigned char *cdb;
 };
+
+#define ENC_GET_STC      _IOR('v', 141, uint32_t)
+
+#define GST_TYPE_DREAMSOURCE_CLOCK \
+  (gst_dreamsource_clock_get_type())
+#define GST_DREAMSOURCE_CLOCK(obj) \
+  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_DREAMSOURCE_CLOCK,GstDreamSourceClock))
+#define GST_DREAMSOURCE_CLOCK_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_DREAMSOURCE_CLOCK,GstDreamSourceClockClass))
+#define GST_IS_DreamSource_CLOCK(obj) \
+  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_DREAMSOURCE_CLOCK))
+#define GST_IS_DreamSource_CLOCK_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_DREAMSOURCE_CLOCK))
+#define GST_DREAMSOURCE_CLOCK_CAST(obj) \
+  ((GstDreamSourceClock*)(obj))
+
+typedef struct _GstDreamSourceClock GstDreamSourceClock;
+typedef struct _GstDreamSourceClockClass GstDreamSourceClockClass;
+
+struct _GstDreamSourceClock
+{
+	GstSystemClock clock;
+
+	uint32_t prev_stc;
+	uint32_t first_stc;
+	uint64_t stc_offset;
+	int fd;
+};
+
+struct _GstDreamSourceClockClass
+{
+	GstSystemClockClass parent_class;
+};
+
+GType gst_dreamsource_clock_get_type (void);
+GstClock *gst_dreamsource_clock_new (const gchar * name, int fd);
 
 G_END_DECLS
 

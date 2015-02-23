@@ -39,6 +39,7 @@ G_BEGIN_DECLS
 #define VENC_SET_RESOLUTION _IOW('v', 131, unsigned int)
 #define VENC_SET_FRAMERATE  _IOW('v', 132, unsigned int)
 #define VENC_SET_SOURCE     _IOW('v', 140, unsigned int)
+#define VENC_GET_STC        _IOR('v', 141, uint32_t)
 
 enum venc_framerate {
         rate_custom = 0,
@@ -103,6 +104,7 @@ typedef struct _VideoFormatInfo            VideoFormatInfo;
 typedef struct _VideoBufferDescriptor      VideoBufferDescriptor;
 
 // #define dump 1
+#define PROVIDE_CLOCK
 
 struct _GstDreamVideoSource
 {
@@ -124,9 +126,16 @@ struct _GstDreamVideoSource
 	GstClockTime base_pts;
 
 	GMutex mutex;
+	GCond cond;
 	int control_sock[2];
 
-	int buffers_in_use;
+	gboolean flushing;
+
+	GThread *readthread;
+	GQueue current_frames;
+	guint buffer_size;
+
+	GstClock *encoder_clock;
 };
 
 struct _GstDreamVideoSourceClass
