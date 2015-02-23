@@ -145,7 +145,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 
 #ifdef PROVIDE_CLOCK
 	gstelement_class->provide_clock = GST_DEBUG_FUNCPTR (gst_dreamvideosource_provide_clock);
-// 	g_type_class_ref (GST_TYPE_SYSTEM_CLOCK);
+//	g_type_class_ref (GST_TYPE_SYSTEM_CLOCK);
 #endif
 
 	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BITRATE,
@@ -649,8 +649,17 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				continue;
 			}
 
+			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, VMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, NULL);
+
+			GstClockTime buffer_dts = GST_CLOCK_TIME_NONE;
+			GstClockTime buffer_pts = GST_CLOCK_TIME_NONE;
+
+			// uiDTS since kernel driver booted
 			if (f & VBD_FLAG_DTS_VALID && desc->uiDTS)
 			{
+				buffer_dts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+				GST_LOG_OBJECT (self, "f & VBD_FLAG_DTS_VALID && uiDTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_dts));
+
 				g_mutex_lock (&self->mutex);
 				if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
 				{
@@ -666,11 +675,18 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 					}
 					if (self->base_pts == GST_CLOCK_TIME_NONE)
 					{
-						self->base_pts = MPEGTIME_TO_GSTTIME(desc->uiDTS);
+						self->base_pts = buffer_dts;
 						GST_DEBUG_OBJECT (self, "use mpeg stream pts as base_pts=%" GST_TIME_FORMAT" (%lld)", GST_TIME_ARGS (self->base_pts), desc->uiDTS);
 					}
 				}
 				g_mutex_unlock (&self->mutex);
+
+				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_dts >= self->base_pts )
+				{
+					buffer_dts -= self->base_pts;
+					GST_BUFFER_DTS(readbuf) = buffer_dts;
+					GST_LOG_OBJECT (self, "corrected dts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_DTS(readbuf)));
+				}
 			}
 
 			if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
@@ -680,54 +696,46 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				break;
 			}
 
-			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, VMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, NULL);
-
-			GstClockTime buffer_time = GST_CLOCK_TIME_NONE;
-
-
 			if (self->video_info.fps_d)
 				GST_BUFFER_DURATION(readbuf) = gst_util_uint64_scale (GST_SECOND, self->video_info.fps_d, self->video_info.fps_n);
 
-			if (f & CDB_FLAG_PTS_VALID)
-			{
-				GstClock *clock = gst_element_get_clock (GST_ELEMENT(self));
-				if (clock)
-				{
-					GstClockTime clock_time, base_time;
-					clock_time = gst_clock_get_time (clock);
-					base_time = gst_element_get_base_time (GST_ELEMENT(self));
-GST_ERROR_OBJECT (self, "\n%" GST_TIME_FORMAT "=mpeg pts\n%" GST_TIME_FORMAT "=dreamsource_clock_time\n%" GST_TIME_FORMAT "=base_time\n%" GST_TIME_FORMAT "=base_pts",
-GST_TIME_ARGS (MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS)), GST_TIME_ARGS (clock_time), GST_TIME_ARGS (base_time), GST_TIME_ARGS(self->base_pts) );
-
-					if (clock_time && clock_time > base_time)
-					{
-						buffer_time = clock_time - base_time;
-						gst_object_unref (clock);
-	// 					buffer_time -= GST_BUFFER_DURATION(readbuf);
-						GST_BUFFER_PTS(readbuf) = buffer_time;
-						GST_BUFFER_DTS(readbuf) = buffer_time;
-
-					}
-					else
-						buffer_time = GST_CLOCK_TIME_NONE;
-				}
-			}
-
-
+// 			if (f & CDB_FLAG_PTS_VALID)
+// 			{
+// 				GstClock *clock = gst_element_get_clock (GST_ELEMENT(self));
+// 				if (clock)
+// 				{
+// 					GstClockTime clock_time, base_time;
+// 					clock_time = gst_clock_get_time (clock);
+// 					base_time = gst_element_get_base_time (GST_ELEMENT(self));
+// GST_ERROR_OBJECT (self, "\n%" GST_TIME_FORMAT "=mpeg pts\n%" GST_TIME_FORMAT "=dreamsource_clock_time\n%" GST_TIME_FORMAT "=base_time\n%" GST_TIME_FORMAT "=base_pts",
+// GST_TIME_ARGS (MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS)), GST_TIME_ARGS (clock_time), GST_TIME_ARGS (base_time), GST_TIME_ARGS(self->base_pts) );
+// 
+// 					if (clock_time && clock_time > base_time)
+// 					{
+// 						buffer_time = clock_time - base_time;
+// 						gst_object_unref (clock);
+// 	// 					buffer_time -= GST_BUFFER_DURATION(readbuf);
+// 						GST_BUFFER_PTS(readbuf) = buffer_time;
+// 						GST_BUFFER_DTS(readbuf) = buffer_time;
+//
+// 					}
+// 					else
+// 						buffer_time = GST_CLOCK_TIME_NONE;
+// 				}
+// 			}
 
 			if (/*(!clock || buffer_time == GST_CLOCK_TIME_NONE) && */f & CDB_FLAG_PTS_VALID)
 			{
-				buffer_time = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				GST_INFO_OBJECT (self, "pts/dts by mpeg pts =%" GST_TIME_FORMAT " (result %" GST_TIME_FORMAT")", GST_TIME_ARGS (buffer_time), GST_TIME_ARGS (buffer_time-self->base_pts));
-				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_time >= self->base_pts )
+				buffer_pts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+				GST_LOG_OBJECT (self, "f & CDB_FLAG_PTS_VALID && uiPTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_dts));
+				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_pts >= self->base_pts )
 				{
-					buffer_time -= self->base_pts/* + GST_BUFFER_DURATION(readbuf)*/;
-					GST_BUFFER_PTS(readbuf) = buffer_time;
-					GST_BUFFER_DTS(readbuf) = buffer_time;
-					GST_INFO_OBJECT (self, "currected pts =%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS(readbuf)));
+					buffer_pts -= self->base_pts/* + GST_BUFFER_DURATION(readbuf)*/;
+					GST_BUFFER_PTS(readbuf) = buffer_pts;
+					GST_INFO_OBJECT (self, "currected pts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS(readbuf)));
 				}
 			}
-			
+
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
 			GST_LOG_OBJECT (self, "read %i dumped %i total %" G_GSIZE_FORMAT " ", desc->stCommon.uiLength, wret, gst_buffer_get_size (*outbuf) );
@@ -809,7 +817,6 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 	}
 	GST_INFO_OBJECT (self, "FLUSHING");
 	return GST_FLOW_FLUSHING;
-
 }
 
 static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition)

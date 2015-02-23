@@ -111,7 +111,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 			uint64_t total_stc = stc + self->stc_offset;
 // 			GST_WARNING_OBJECT (self, "after subtract stc_offset=%" PRIu64 "   new total_stc=%" PRIu64 "", self->stc_offset, total_stc);
 			encoder_time = ENCTIME_TO_GSTTIME(total_stc);
-			GST_INFO_OBJECT (self, "result %" GST_TIME_FORMAT "", GST_TIME_ARGS(encoder_time));
+			GST_LOG_OBJECT (self, "result %" GST_TIME_FORMAT "", GST_TIME_ARGS(encoder_time));
 		}
 		else
 			GST_WARNING_OBJECT (self, "can't ENC_GET_STC error: %s, fd=%i, ret=%i", strerror(errno), self->fd, ret);
