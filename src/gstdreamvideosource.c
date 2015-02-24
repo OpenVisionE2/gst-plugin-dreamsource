@@ -277,7 +277,7 @@ void gst_dreamvideosource_set_input_mode (GstDreamVideoSource *self, GstDreamVid
 	if (!val)
 	{
 		GST_ERROR_OBJECT (self, "no such input_mode %i!", mode);
-		goto out;
+		return;
 	}
 	const gchar *value_nick = val->value_nick;
 	GST_DEBUG_OBJECT (self, "setting input_mode to %s (%i)...", value_nick, mode);
@@ -352,7 +352,7 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	sprintf(fn_buf, "/dev/venc%d", 0);
 	self->encoder->fd = open(fn_buf, O_RDWR | O_SYNC);
 	if(self->encoder->fd <= 0) {
-		GST_ERROR_OBJECT(self,"cannot open device %s (%s)", fn_buf, strerror(errno));
+		GST_ERROR_OBJECT (self,"cannot open device %s (%s)", fn_buf, strerror(errno));
 		free(self->encoder);
 		self->encoder = NULL;
 		return;
@@ -366,8 +366,9 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 
 	self->encoder->cdb = (unsigned char *)mmap(0, VMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
 
-	if(!self->encoder->cdb) {
-		GST_ERROR_OBJECT(self,"cannot mmap cdb");
+	if(!self->encoder->cdb || self->encoder->cdb == MAP_FAILED) {
+		GST_ERROR_OBJECT(self,"cannot alloc buffer: %s (%d)", strerror(errno));
+		self->encoder->cdb = NULL;
 		return;
 	}
 
@@ -828,6 +829,8 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 	switch (transition) {
 		case GST_STATE_CHANGE_NULL_TO_READY:
 		{
+			if (!(self->encoder && self->encoder->cdb))
+				return GST_STATE_CHANGE_FAILURE;
 			int control_sock[2];
 			if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
 			{

@@ -263,8 +263,9 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 	}
 
 	self->encoder->cdb = (unsigned char *)mmap(0, AMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
-	if(!self->encoder->cdb || self->encoder->cdb== MAP_FAILED) {
+	if(!self->encoder->cdb || self->encoder->cdb == MAP_FAILED) {
 		GST_ERROR_OBJECT(self,"cannot mmap cdb: %s (%d)", strerror(errno));
+		self->encoder->cdb = NULL;
 		return;
 	}
 
@@ -527,8 +528,14 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (element);
 	GstStateChangeReturn sret = GST_STATE_CHANGE_SUCCESS;
 	int ret;
-	GST_OBJECT_LOCK (self);
 	switch (transition) {
+		case GST_STATE_CHANGE_NULL_TO_READY:
+		{
+			if (!(self->encoder && self->encoder->cdb))
+				return GST_STATE_CHANGE_FAILURE;
+			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_NULL_TO_READY");
+			break;
+		}
 		case GST_STATE_CHANGE_READY_TO_PAUSED:
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_READY_TO_PAUSED");
 #ifdef PROVIDE_CLOCK
@@ -536,6 +543,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 #endif
 			break;
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+			g_mutex_lock (&self->mutex);
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
 			self->base_pts = GST_CLOCK_TIME_NONE;
 			ret = ioctl(self->encoder->fd, AENC_START);
@@ -544,6 +552,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 			self->descriptors_available = 0;
 			CLEAR_COMMAND (self);
 			GST_INFO_OBJECT (self, "started encoder!");
+			g_mutex_unlock (&self->mutex);
 			break;
 		default:
 			break;
@@ -554,6 +563,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 
 	switch (transition) {
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+			g_mutex_lock (&self->mutex);
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
 			while (self->descriptors_count < self->descriptors_available)
 			{
@@ -569,6 +579,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 			gst_clock_set_master (self->encoder_clock, NULL);
 #endif
 			GST_INFO_OBJECT (self, "stopped encoder!");
+			g_mutex_unlock (&self->mutex);
 			break;
 		case GST_STATE_CHANGE_PAUSED_TO_READY:
 			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_PAUSED_TO_READY");
@@ -582,7 +593,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 	return sret;
 fail:
 	GST_ERROR_OBJECT(self,"can't perform encoder ioctl!");
-	GST_OBJECT_UNLOCK (self);
+	g_mutex_unlock (&self->mutex);
 	return GST_STATE_CHANGE_FAILURE;
 }
 

@@ -71,7 +71,7 @@ typedef struct _AudioFormatInfo            AudioFormatInfo;
 typedef struct _AudioBufferDescriptor      AudioBufferDescriptor;
 
 // #define dump 1
-#define PROVIDE_CLOCK
+// #define PROVIDE_CLOCK
 
 struct _bufferdebug
 {
