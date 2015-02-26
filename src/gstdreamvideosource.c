@@ -658,8 +658,8 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			// uiDTS since kernel driver booted
 			if (f & VBD_FLAG_DTS_VALID && desc->uiDTS)
 			{
-				buffer_dts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				GST_LOG_OBJECT (self, "f & VBD_FLAG_DTS_VALID && uiDTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_dts));
+				buffer_dts = MPEGTIME_TO_GSTTIME(desc->uiDTS);
+				GST_LOG_OBJECT (self, "f & VBD_FLAG_DTS_VALID && encoder's uiDTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_dts));
 
 				g_mutex_lock (&self->mutex);
 				if (G_UNLIKELY (self->base_pts == GST_CLOCK_TIME_NONE))
@@ -728,7 +728,7 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			if (/*(!clock || buffer_time == GST_CLOCK_TIME_NONE) && */f & CDB_FLAG_PTS_VALID)
 			{
 				buffer_pts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				GST_LOG_OBJECT (self, "f & CDB_FLAG_PTS_VALID && uiPTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_dts));
+				GST_LOG_OBJECT (self, "f & CDB_FLAG_PTS_VALID && encoder's  uiPTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_pts));
 				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_pts >= self->base_pts )
 				{
 					buffer_pts -= self->base_pts/* + GST_BUFFER_DURATION(readbuf)*/;
