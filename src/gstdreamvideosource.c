@@ -598,6 +598,7 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			}
 			else if ( ret == 0 && self->descriptors_available == 0 )
 			{
+				gst_clock_get_time(self->encoder_clock);
 				g_mutex_lock (&self->mutex);
 				if (self->flushing)
 				{
@@ -820,6 +821,7 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 	return GST_FLOW_FLUSHING;
 }
 
+
 static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (element);
@@ -877,7 +879,6 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 
 	switch (transition) {
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_READY_TO_PAUSED");
 			g_mutex_lock (&self->mutex);
 			self->flushing = TRUE;
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);

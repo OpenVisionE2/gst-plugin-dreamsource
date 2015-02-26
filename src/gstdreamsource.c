@@ -95,6 +95,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 		int ret = ioctl(self->fd, ENC_GET_STC, &stc);
 		if (ret == 0)
 		{
+			GST_LOG_OBJECT (self, "current stc=%" GST_TIME_FORMAT "", GST_TIME_ARGS(ENCTIME_TO_GSTTIME(stc)));
 			if (G_UNLIKELY(self->first_stc == 0))
 				self->first_stc = stc;
 

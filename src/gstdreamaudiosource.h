@@ -71,14 +71,7 @@ typedef struct _AudioFormatInfo            AudioFormatInfo;
 typedef struct _AudioBufferDescriptor      AudioBufferDescriptor;
 
 // #define dump 1
-// #define PROVIDE_CLOCK
-
-struct _bufferdebug
-{
-	GstDreamAudioSource *self;
-	GstBuffer *buffer;
-	GstClockTime buffer_pts;
-};
+#define PROVIDE_CLOCK
 
 struct _GstDreamAudioSource
 {
@@ -100,9 +93,14 @@ struct _GstDreamAudioSource
 	GstClockTime base_pts;
 
 	GMutex mutex;
+	GCond cond;
 	int control_sock[2];
 
-	GList *buffers_list;
+	gboolean flushing;
+
+	GThread *readthread;
+	GQueue current_frames;
+	guint buffer_size;
 
 	GstClock *encoder_clock;
 };
