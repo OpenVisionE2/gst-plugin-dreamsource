@@ -775,8 +775,8 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_dts >= self->base_pts )
 				{
 					buffer_dts -= self->base_pts;
-					GST_BUFFER_DTS(readbuf) = buffer_dts;
-					GST_LOG_OBJECT (self, "corrected dts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_DTS(readbuf)));
+// 					GST_BUFFER_DTS(readbuf) = buffer_dts;
+// 					GST_LOG_OBJECT (self, "corrected dts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_DTS(readbuf)));
 				}
 			}
 
@@ -790,42 +790,52 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			if (self->video_info.fps_d)
 				GST_BUFFER_DURATION(readbuf) = gst_util_uint64_scale (GST_SECOND, self->video_info.fps_d, self->video_info.fps_n);
 
-// 			if (f & CDB_FLAG_PTS_VALID)
-// 			{
-// 				GstClock *clock = gst_element_get_clock (GST_ELEMENT(self));
-// 				if (clock)
-// 				{
-// 					GstClockTime clock_time, base_time;
-// 					clock_time = gst_clock_get_time (clock);
-// 					base_time = gst_element_get_base_time (GST_ELEMENT(self));
-// GST_ERROR_OBJECT (self, "\n%" GST_TIME_FORMAT "=mpeg pts\n%" GST_TIME_FORMAT "=dreamsource_clock_time\n%" GST_TIME_FORMAT "=base_time\n%" GST_TIME_FORMAT "=base_pts",
-// GST_TIME_ARGS (MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS)), GST_TIME_ARGS (clock_time), GST_TIME_ARGS (base_time), GST_TIME_ARGS(self->base_pts) );
-// 
-// 					if (clock_time && clock_time > base_time)
-// 					{
-// 						buffer_time = clock_time - base_time;
-// 						gst_object_unref (clock);
-// 	// 					buffer_time -= GST_BUFFER_DURATION(readbuf);
-// 						GST_BUFFER_PTS(readbuf) = buffer_time;
-// 						GST_BUFFER_DTS(readbuf) = buffer_time;
-//
-// 					}
-// 					else
-// 						buffer_time = GST_CLOCK_TIME_NONE;
-// 				}
-// 			}
-
-			if (/*(!clock || buffer_time == GST_CLOCK_TIME_NONE) && */f & CDB_FLAG_PTS_VALID)
+			if (f & CDB_FLAG_PTS_VALID)
 			{
-				buffer_pts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
-				GST_LOG_OBJECT (self, "f & CDB_FLAG_PTS_VALID && encoder's  uiPTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_pts));
-				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_pts >= self->base_pts )
+				GstClock *clock = gst_element_get_clock (GST_ELEMENT(self));
+				GstClockTime buffer_time;
+				GstClockTime original_mpeg_pts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+				GstClockTime rebased_mpeg_pts = original_mpeg_pts-self->base_pts;
+				if (clock)
 				{
-					buffer_pts -= self->base_pts/* + GST_BUFFER_DURATION(readbuf)*/;
-					GST_BUFFER_PTS(readbuf) = buffer_pts;
-					GST_INFO_OBJECT (self, "currected pts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS(readbuf)));
+					GstClockTime clock_time, base_time;
+					clock_time = gst_clock_get_time (clock);
+					base_time = gst_element_get_base_time (GST_ELEMENT(self));
+					if (clock_time && clock_time > base_time)
+					{
+						buffer_time = clock_time - base_time;
+						GST_BUFFER_PTS(readbuf) = buffer_time;
+						GST_BUFFER_DTS(readbuf) = buffer_time - (buffer_pts-rebased_mpeg_pts);
+					}
+					else
+						buffer_time = GST_CLOCK_TIME_NONE;
+					gint64 diff = rebased_mpeg_pts - buffer_time;
+
+GST_ERROR_OBJECT (self, "\n"
+"%" GST_TIME_FORMAT "=rebased_mpeg_pts (original_mpeg_pts=%" GST_TIME_FORMAT " and base_pts=%" GST_TIME_FORMAT ")\n"
+"%" GST_TIME_FORMAT "=calculated pts (diff= %s %" GST_TIME_FORMAT ")\n"
+"%" GST_TIME_FORMAT "=dreamsource_clock_time\n"
+"%" GST_TIME_FORMAT "=base_time\n"
+,
+	GST_TIME_ARGS (rebased_mpeg_pts), GST_TIME_ARGS (original_mpeg_pts), GST_TIME_ARGS (self->base_pts),
+	GST_TIME_ARGS (buffer_time), diff>0?"+":"-", GST_TIME_ARGS (diff>0?diff:diff*-1LL),
+	GST_TIME_ARGS (clock_time),
+	GST_TIME_ARGS (base_time)
+);
+					gst_object_unref (clock);
 				}
 			}
+// 			if (/*(!clock || buffer_time == GST_CLOCK_TIME_NONE) && */f & CDB_FLAG_PTS_VALID)
+// 			{
+// 				buffer_pts = MPEGTIME_TO_GSTTIME(desc->stCommon.uiPTS);
+// 				GST_LOG_OBJECT (self, "f & CDB_FLAG_PTS_VALID && encoder's  uiPTS=%" GST_TIME_FORMAT"", GST_TIME_ARGS(buffer_pts));
+// 				if (self->base_pts != GST_CLOCK_TIME_NONE && buffer_pts >= self->base_pts )
+// 				{
+// 					buffer_pts -= self->base_pts/* + GST_BUFFER_DURATION(readbuf)*/;
+// 					GST_BUFFER_PTS(readbuf) = buffer_pts;
+// 					GST_INFO_OBJECT (self, "currected pts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS(readbuf)));
+// 				}
+// 			}*/
 
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
