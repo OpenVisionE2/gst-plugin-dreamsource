@@ -114,6 +114,9 @@ struct _EncoderInfo {
 
 	/* mmapp'ed data buffer */
 	unsigned char *cdb;
+
+	guint         used_range_min;
+	guint         used_range_max;
 };
 
 #define ENC_GET_STC      _IOR('v', 141, uint32_t)

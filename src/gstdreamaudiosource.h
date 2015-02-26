@@ -28,7 +28,7 @@ struct _AudioBufferDescriptor
 	CompressedBufferDescriptor stCommon;
 	uint32_t uiRawDataOffset;
 	size_t   uiRawDataLength;
-	uint8_t uiDataUnitType;
+	uint8_t  uiDataUnitType;
 };
 
 struct _AudioFormatInfo {
@@ -73,6 +73,14 @@ typedef struct _AudioBufferDescriptor      AudioBufferDescriptor;
 // #define dump 1
 #define PROVIDE_CLOCK
 
+struct _buffer_memorytracker
+{
+	GstDreamAudioSource *self;
+	GstBuffer *buffer;
+	guint uiOffset;
+	guint uiLength;
+};
+
 struct _GstDreamAudioSource
 {
 	GstPushSrc element;
@@ -101,6 +109,7 @@ struct _GstDreamAudioSource
 	GThread *readthread;
 	GQueue current_frames;
 	guint buffer_size;
+	GList *memtrack_list;
 
 	GstClock *encoder_clock;
 };

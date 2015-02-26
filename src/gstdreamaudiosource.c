@@ -309,6 +309,10 @@ static gboolean gst_dreamaudiosource_encoder_init (GstDreamAudioSource * self)
 	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
 	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
 
+	self->memtrack_list = NULL;
+	self->encoder->used_range_min = UINT32_MAX;
+	self->encoder->used_range_max = 0;
+
 	gst_dreamaudiosource_set_bitrate (self, self->audio_info.bitrate);
 	gst_dreamaudiosource_set_input_mode (self, self->input_mode);
 
@@ -333,6 +337,7 @@ static void gst_dreamaudiosource_encoder_release (GstDreamAudioSource * self)
 			close(self->encoder->fd);
 		free(self->encoder);
 	}
+	g_list_free(self->memtrack_list);
 	self->encoder = NULL;
 	close (READ_SOCKET (self));
 	close (WRITE_SOCKET (self));
@@ -425,6 +430,34 @@ static gboolean gst_dreamaudiosource_unlock_stop (GstBaseSrc * bsrc)
 	g_queue_clear (&self->current_frames);
 	g_mutex_unlock (&self->mutex);
 	return TRUE;
+}
+
+static void gst_dreamaudiosource_free_buffer (struct _buffer_memorytracker * memtrack)
+{
+	GstDreamAudioSource * self = memtrack->self;
+	GST_OBJECT_LOCK(self);
+	GST_TRACE_OBJECT (self, "freeing %" GST_PTR_FORMAT " uiOffset=%i uiLength=%i used_range_min=%i", memtrack->buffer, memtrack->uiOffset, memtrack->uiLength, self->encoder->used_range_min);
+	GList *list = g_list_first (self->memtrack_list);
+	guint abs_minimum = UINT32_MAX;
+	guint abs_maximum = 0;
+	struct _buffer_memorytracker * mt;
+	int count = 0;
+	self->memtrack_list = g_list_remove(list, memtrack);
+	free(memtrack);
+	list = g_list_first (self->memtrack_list);
+	while (list) {
+		mt = list->data;
+		if (abs_minimum > 0 && mt->uiOffset < abs_minimum)
+			abs_minimum = mt->uiOffset;
+		if (mt->uiOffset+mt->uiLength > abs_maximum)
+			abs_maximum = mt->uiOffset+mt->uiLength;
+		count++;
+		list = g_list_next (list);
+	}
+	GST_TRACE_OBJECT (self, "new abs_minimum=%i, abs_maximum=%i", abs_minimum, abs_maximum);
+	self->encoder->used_range_min = abs_minimum;
+	self->encoder->used_range_max = abs_maximum;
+	GST_OBJECT_UNLOCK(self);
 }
 
 static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
@@ -529,8 +562,6 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 
 			uint32_t f = desc->stCommon.uiFlags;
 
-			GST_LOG_OBJECT (self, "descriptors_count=%d, descriptors_available=%d\tuiOffset=%d, uiLength=%d", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
-
 			if (G_UNLIKELY (f & CDB_FLAG_METADATA))
 			{
 				GST_LOG_OBJECT (self, "CDB_FLAG_METADATA... skip outdated packet");
@@ -538,7 +569,36 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				continue;
 			}
 
-			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, self, NULL);
+			struct _buffer_memorytracker * memtrack = malloc(sizeof(struct _buffer_memorytracker));
+			if (G_UNLIKELY (!memtrack))
+			{
+				GST_ERROR_OBJECT (self, "can't allocate buffer_memorytracker");
+				goto stop_running;
+			}
+
+			GST_LOG_OBJECT (self, "descriptors_count=%d, descriptors_available=%d\tuiOffset=%d, uiLength=%d", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
+
+			if (self->encoder->used_range_min == UINT32_MAX)
+				self->encoder->used_range_min = desc->stCommon.uiOffset;
+
+			if (self->encoder->used_range_max == 0)
+				self->encoder->used_range_max = desc->stCommon.uiOffset+desc->stCommon.uiLength;
+
+			if (desc->stCommon.uiOffset < self->encoder->used_range_max && desc->stCommon.uiOffset+desc->stCommon.uiLength > self->encoder->used_range_min)
+			{
+				GST_WARNING_OBJECT (self, "encoder overwrites buffer memory that is still in use! uiOffset=%i uiLength=%i used_range_min=%i used_range_max=%i", desc->stCommon.uiOffset, desc->stCommon.uiLength, self->encoder->used_range_min, self->encoder->used_range_max);
+				self->descriptors_count++;
+				readbuf = gst_buffer_new();
+				continue;
+			}
+
+			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
+
+			memtrack->self = self;
+			memtrack->buffer = readbuf;
+			memtrack->uiOffset = desc->stCommon.uiOffset;
+			memtrack->uiLength = desc->stCommon.uiLength;
+			self->memtrack_list = g_list_append(self->memtrack_list, memtrack);
 
 			GstClockTime buffer_pts = GST_CLOCK_TIME_NONE;
 
