@@ -99,6 +99,9 @@ static void gst_dreamvideosource_get_property (GObject * object, guint prop_id, 
 static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * element, GstStateChange transition);
 static gint64 gst_dreamvideosource_get_base_pts (GstDreamVideoSource *self);
 
+static gboolean gst_dreamvideosource_encoder_init (GstDreamVideoSource * self);
+static void gst_dreamvideosource_encoder_release (GstDreamVideoSource * self);
+
 static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self);
 
 #ifdef PROVIDE_CLOCK
@@ -341,46 +344,90 @@ gst_dreamvideosource_init (GstDreamVideoSource * self)
 	gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
 	gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
 
-	self->encoder = malloc(sizeof(EncoderInfo));
+	self->encoder = NULL;
+	self->encoder_clock = NULL;
 
-	if(!self->encoder) {
-		GST_ERROR_OBJECT(self,"out of space");
-		return;
+#ifdef dump
+	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
+	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
+#endif
+}
+
+static gboolean gst_dreamvideosource_encoder_init (GstDreamVideoSource * self)
+{
+	GST_LOG_OBJECT (self, "initializating encoder...");
+	self->encoder = malloc (sizeof(EncoderInfo));
+
+	if (!self->encoder) {
+		GST_ERROR_OBJECT (self,"out of space");
+		return FALSE;
 	}
 
 	char fn_buf[32];
 	sprintf(fn_buf, "/dev/venc%d", 0);
 	self->encoder->fd = open(fn_buf, O_RDWR | O_SYNC);
-	if(self->encoder->fd <= 0) {
+	if (self->encoder->fd <= 0) {
 		GST_ERROR_OBJECT (self,"cannot open device %s (%s)", fn_buf, strerror(errno));
 		free(self->encoder);
 		self->encoder = NULL;
-		return;
+		return FALSE;
 	}
 
 	self->encoder->buffer = malloc(VBUFSIZE);
-	if(!self->encoder->buffer) {
+	if (!self->encoder->buffer) {
 		GST_ERROR_OBJECT(self,"cannot alloc buffer");
-		return;
+		return FALSE;
 	}
 
-	self->encoder->cdb = (unsigned char *)mmap(0, VMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
+	self->encoder->cdb = (unsigned char *)mmap (0, VMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
 
-	if(!self->encoder->cdb || self->encoder->cdb == MAP_FAILED) {
+	if (!self->encoder->cdb || self->encoder->cdb == MAP_FAILED) {
 		GST_ERROR_OBJECT(self,"cannot alloc buffer: %s (%d)", strerror(errno));
 		self->encoder->cdb = NULL;
-		return;
+		return FALSE;
 	}
+
+	int control_sock[2];
+	if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
+	{
+		GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE, (NULL), GST_ERROR_SYSTEM);
+		return GST_STATE_CHANGE_FAILURE;
+	}
+	READ_SOCKET (self) = control_sock[0];
+	WRITE_SOCKET (self) = control_sock[1];
+	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
+	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
 
 #ifdef PROVIDE_CLOCK
 	self->encoder_clock = gst_dreamsource_clock_new ("GstDreamVideoSinkClock", self->encoder->fd);
 	GST_OBJECT_FLAG_SET (self, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
 #endif
 
-#ifdef dump
-	self->dumpfd = open("/media/hdd/movie/dreamvideosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
-	GST_DEBUG_OBJECT (self, "dumpfd = %i (%s)", self->dumpfd, (self->dumpfd > 0) ? "OK" : strerror(errno));
-#endif
+	GST_LOG_OBJECT (self, "encoder %s successfully initialized", fn_buf);
+	return TRUE;
+}
+
+static void gst_dreamvideosource_encoder_release (GstDreamVideoSource * self)
+{
+	GST_LOG_OBJECT (self, "releasing encoder...");
+	if (self->encoder) {
+		if (self->encoder->buffer)
+			free(self->encoder->buffer);
+		if (self->encoder->cdb)
+			munmap(self->encoder->cdb, VMMAPSIZE);
+		if (self->encoder->fd)
+			close(self->encoder->fd);
+		free(self->encoder);
+	}
+	self->encoder = NULL;
+	close (READ_SOCKET (self));
+	close (WRITE_SOCKET (self));
+	READ_SOCKET (self) = -1;
+	WRITE_SOCKET (self) = -1;
+	if (self->encoder_clock) {
+		gst_object_unref (self->encoder_clock);
+		self->encoder_clock = NULL;
+	}
 }
 
 static void
@@ -831,18 +878,8 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 	switch (transition) {
 		case GST_STATE_CHANGE_NULL_TO_READY:
 		{
-			if (!(self->encoder && self->encoder->cdb))
+			if (!gst_dreamvideosource_encoder_init (self))
 				return GST_STATE_CHANGE_FAILURE;
-			int control_sock[2];
-			if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
-			{
-				GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE, (NULL), GST_ERROR_SYSTEM);
-				return GST_STATE_CHANGE_FAILURE;
-			}
-			READ_SOCKET (self) = control_sock[0];
-			WRITE_SOCKET (self) = control_sock[1];
-			fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
-			fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_NULL_TO_READY");
 			break;
 		}
@@ -908,10 +945,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			g_thread_join (self->readthread);
 			break;
 		case GST_STATE_CHANGE_READY_TO_NULL:
-			close (READ_SOCKET (self));
-			close (WRITE_SOCKET (self));
-			READ_SOCKET (self) = -1;
-			WRITE_SOCKET (self) = -1;
+			gst_dreamvideosource_encoder_release (self);
 			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_READY_TO_NULL, close control sockets");
 			break;
 		default:
@@ -948,15 +982,6 @@ static void
 gst_dreamvideosource_dispose (GObject * gobject)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (gobject);
-	if (self->encoder) {
-		if (self->encoder->buffer)
-			free(self->encoder->buffer);
-		if (self->encoder->cdb)
-			munmap(self->encoder->cdb, VMMAPSIZE);
-		if (self->encoder->fd)
-			close(self->encoder->fd);
-		free(self->encoder);
-	}
 #ifdef PROVIDE_CLOCK
 	if (self->encoder_clock) {
 		gst_object_unref (self->encoder_clock);
