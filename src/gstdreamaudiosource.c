@@ -168,17 +168,25 @@ gst_dreamaudiosource_get_base_pts (GstDreamAudioSource *self)
 
 static void gst_dreamaudiosource_set_bitrate (GstDreamAudioSource * self, uint32_t bitrate)
 {
-	if (!self->encoder || !self->encoder->fd)
-		return;
+	g_mutex_lock (&self->mutex);
 	uint32_t abr = bitrate*1000;
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->audio_info.bitrate = bitrate;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
 	int ret = ioctl(self->encoder->fd, AENC_SET_BITRATE, &abr);
 	if (ret != 0)
 	{
 		GST_WARNING_OBJECT (self, "can't set audio bitrate to %i bytes/s!", abr);
+		g_mutex_unlock (&self->mutex);
 		return;
 	}
 	GST_INFO_OBJECT (self, "set audio bitrate to %i kBytes/s", bitrate);
-	self->audio_info.bitrate = abr;
+	self->audio_info.bitrate = bitrate;
+	g_mutex_unlock (&self->mutex);
 }
 
 void gst_dreamaudiosource_set_input_mode (GstDreamAudioSource *self, GstDreamAudioSourceInputMode mode)
@@ -191,11 +199,11 @@ void gst_dreamaudiosource_set_input_mode (GstDreamAudioSource *self, GstDreamAud
 		goto out;
 	}
 	const gchar *value_nick = val->value_nick;
-	GST_DEBUG_OBJECT (self, "setting input_mode to %s (%i)...", value_nick, mode);
+
 	g_mutex_lock (&self->mutex);
 	if (!self->encoder || !self->encoder->fd)
 	{
-		GST_ERROR_OBJECT (self, "can't set input mode because encoder device not opened!");
+		self->input_mode = mode;
 		goto out;
 	}
 	int int_mode = mode;
@@ -300,6 +308,9 @@ static gboolean gst_dreamaudiosource_encoder_init (GstDreamAudioSource * self)
 	WRITE_SOCKET (self) = control_sock[1];
 	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
 	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
+
+	gst_dreamaudiosource_set_bitrate (self, self->audio_info.bitrate);
+	gst_dreamaudiosource_set_input_mode (self, self->input_mode);
 
 #ifdef PROVIDE_CLOCK
 	self->encoder_clock = gst_dreamsource_clock_new ("GstDreamAudioSourceClock", self->encoder->fd);
@@ -448,6 +459,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 			rfd[0].fd = READ_SOCKET (self);
 			rfd[0].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
 
+			GST_DEBUG_OBJECT (self, "polling... self->descriptors_available=%i! fd=%i", self->descriptors_available, enc->fd);
 			if (self->descriptors_available == 0)
 			{
 				rfd[1].fd = enc->fd;
@@ -478,6 +490,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				{
 					GST_DEBUG_OBJECT (self, "FLUSHING!");
 					g_cond_signal (&self->cond);
+					g_mutex_unlock (&self->mutex);
 					continue;
 				}
 				g_mutex_unlock (&self->mutex);

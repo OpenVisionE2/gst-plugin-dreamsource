@@ -186,10 +186,15 @@ gst_dreamvideosource_get_base_pts (GstDreamVideoSource *self)
 
 static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32_t bitrate)
 {
-	if (!self->encoder || !self->encoder->fd)
-		return;
 	g_mutex_lock (&self->mutex);
 	uint32_t vbr = bitrate*1000;
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.bitrate = bitrate;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
 	int ret = ioctl(self->encoder->fd, VENC_SET_BITRATE, &vbr);
 	if (ret != 0)
 	{
@@ -198,19 +203,19 @@ static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32
 		return;
 	}
 	GST_INFO_OBJECT (self, "set video bitrate to %i kBytes/s", bitrate);
-	self->video_info.bitrate = vbr;
+	self->video_info.bitrate = bitrate;
 	g_mutex_unlock (&self->mutex);
 }
 
 static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, VideoFormatInfo * info)
 {
+	g_mutex_lock (&self->mutex);
 	if (!self->encoder || !self->encoder->fd)
 	{
-		GST_ERROR_OBJECT (self, "can't set format because encoder device not opened!");
-		return FALSE;
+		self->video_info = *info;
+		g_mutex_unlock (&self->mutex);
+		return TRUE;
 	}
-
-	g_mutex_lock (&self->mutex);
 
 	if (info->fps_n > 0)
 	{
@@ -283,12 +288,11 @@ void gst_dreamvideosource_set_input_mode (GstDreamVideoSource *self, GstDreamVid
 		return;
 	}
 	const gchar *value_nick = val->value_nick;
-	GST_DEBUG_OBJECT (self, "setting input_mode to %s (%i)...", value_nick, mode);
 
 	g_mutex_lock (&self->mutex);
 	if (!self->encoder || !self->encoder->fd)
 	{
-		GST_ERROR_OBJECT (self, "can't set input mode because encoder device not opened!");
+		self->input_mode = mode;
 		goto out;
 	}
 	int int_mode = mode;
@@ -300,6 +304,7 @@ void gst_dreamvideosource_set_input_mode (GstDreamVideoSource *self, GstDreamVid
 	}
 	GST_INFO_OBJECT (self, "successfully set input mode to %s (%i)", value_nick, mode);
 	self->input_mode = mode;
+
 out:
 	g_mutex_unlock (&self->mutex);
 	return;
@@ -397,6 +402,10 @@ static gboolean gst_dreamvideosource_encoder_init (GstDreamVideoSource * self)
 	WRITE_SOCKET (self) = control_sock[1];
 	fcntl (READ_SOCKET (self), F_SETFL, O_NONBLOCK);
 	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
+
+	gst_dreamvideosource_set_bitrate (self, self->video_info.bitrate);
+	gst_dreamvideosource_set_format (self, &self->video_info);
+	gst_dreamvideosource_set_input_mode (self, self->input_mode);
 
 #ifdef PROVIDE_CLOCK
 	self->encoder_clock = gst_dreamsource_clock_new ("GstDreamVideoSinkClock", self->encoder->fd);
@@ -651,6 +660,7 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				{
 					GST_DEBUG_OBJECT (self, "FLUSHING!");
 					g_cond_signal (&self->cond);
+					g_mutex_unlock (&self->mutex);
 					continue;
 				}
 				g_mutex_unlock (&self->mutex);
