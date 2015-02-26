@@ -604,6 +604,8 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				}
 				g_queue_push_tail (&self->current_frames, readbuf);
 			}
+			else
+				gst_buffer_unref(readbuf);
 			g_cond_signal (&self->cond);
 			GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
 			g_mutex_unlock (&self->mutex);
