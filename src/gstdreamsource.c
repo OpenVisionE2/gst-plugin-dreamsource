@@ -60,14 +60,13 @@ static void
 gst_dreamsource_clock_class_init (GstDreamSourceClockClass * klass)
 {
 	GstClockClass *clock_class = (GstClockClass *) klass;
-
+	GST_DEBUG_CATEGORY_INIT (dreamsourceclock_debug, "dreamsourceclock", 0, "dreamsourceclock");
 	clock_class->get_internal_time = gst_dreamsource_clock_get_internal_time;
 }
 
 static void
 gst_dreamsource_clock_init (GstDreamSourceClock * self)
 {
-	GST_DEBUG_CATEGORY_INIT (dreamsourceclock_debug, "dreamsourceclock", 0, "dreamsourceclock");
 	self->fd = 0;
 	self->stc_offset = 0;
 	self->first_stc = 0;
@@ -91,6 +90,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 	uint32_t stc;
 	GstClockTime encoder_time = 0;
 
+	GST_OBJECT_LOCK(self);
 	if (self->fd > 0) {
 		int ret = ioctl(self->fd, ENC_GET_STC, &stc);
 		if (ret == 0)
@@ -120,5 +120,6 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 	else
 		GST_ERROR_OBJECT (self, "timebase not available because encoder device is not opened");
 
+	GST_OBJECT_UNLOCK(self);
 	return encoder_time;
 }
