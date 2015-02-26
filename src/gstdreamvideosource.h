@@ -115,7 +115,7 @@ struct _GstDreamVideoSource
 	GstDreamVideoSourceInputMode input_mode;
 
 	VideoFormatInfo video_info;
-	GstCaps *current_caps;
+	GstCaps *current_caps, *new_caps;
 
 	unsigned int descriptors_available;
 	unsigned int descriptors_count;
