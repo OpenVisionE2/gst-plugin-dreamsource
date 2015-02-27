@@ -856,11 +856,11 @@ GST_LOG_OBJECT (self, "post-calibration\n"
 					gst_buffer_unref(oldbuf);
 				}
 				g_queue_push_tail (&self->current_frames, readbuf);
+				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
 			}
 			else
 				gst_buffer_unref(readbuf);
 			g_cond_signal (&self->cond);
-			GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
 			g_mutex_unlock (&self->mutex);
 		}
 	}

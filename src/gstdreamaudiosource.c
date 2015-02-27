@@ -244,6 +244,7 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 	self->readthread = NULL;
 
 	g_mutex_init (&self->mutex);
+	g_cond_init (&self->cond);
 	READ_SOCKET (self) = -1;
 	WRITE_SOCKET (self) = -1;
 
@@ -489,7 +490,6 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 			rfd[0].fd = READ_SOCKET (self);
 			rfd[0].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
 
-			GST_DEBUG_OBJECT (self, "polling... self->descriptors_available=%i! fd=%i", self->descriptors_available, enc->fd);
 			if (self->descriptors_available == 0)
 			{
 				rfd[1].fd = enc->fd;
@@ -526,7 +526,8 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				g_mutex_unlock (&self->mutex);
 				GST_DEBUG_OBJECT (self, "SELECT TIMEOUT");
 				//!!! TODO generate valid dummy payload
-				readbuf = gst_buffer_new();
+				if (self->dts_offset != GST_CLOCK_TIME_NONE)
+					readbuf = gst_buffer_new();
 			}
 			else if ( rfd[0].revents )
 			{
@@ -698,11 +699,11 @@ GST_LOG_OBJECT (self, "post-calibration\n"
 					gst_buffer_unref(oldbuf);
 				}
 				g_queue_push_tail (&self->current_frames, readbuf);
+				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
 			}
 			else
 				gst_buffer_unref(readbuf);
 			g_cond_signal (&self->cond);
-			GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
 			g_mutex_unlock (&self->mutex);
 		}
 	}
