@@ -98,7 +98,7 @@ struct _GstDreamAudioSource
 	goffset dumpsize;
 
 	GstElement *dreamvideosrc;
-	GstClockTime base_pts;
+	gint64 dts_offset;
 
 	GMutex mutex;
 	GCond cond;
@@ -117,7 +117,7 @@ struct _GstDreamAudioSource
 struct _GstDreamAudioSourceClass
 {
 	GstPushSrcClass parent_class;
-	gint64 (*get_base_pts) (GstDreamAudioSource *self);
+	gint64 (*get_dts_offset) (GstDreamAudioSource *self);
 };
 
 GType gst_dreamaudiosource_get_type (void);

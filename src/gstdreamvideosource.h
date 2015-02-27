@@ -123,13 +123,14 @@ struct _GstDreamVideoSource
 	int dumpfd;
 
 	GstElement *dreamaudiosrc;
-	GstClockTime base_pts;
+	gint64 dts_offset;
 
 	GMutex mutex;
 	GCond cond;
 	int control_sock[2];
 
 	gboolean flushing;
+	gboolean dts_valid;
 
 	GThread *readthread;
 	GQueue current_frames;
@@ -141,7 +142,7 @@ struct _GstDreamVideoSource
 struct _GstDreamVideoSourceClass
 {
 	GstPushSrcClass parent_class;
-	gint64 (*get_base_pts) (GstDreamVideoSource *self);
+	gint64 (*get_dts_offset) (GstDreamVideoSource *self);
 };
 
 GType gst_dreamvideosource_get_type (void);
