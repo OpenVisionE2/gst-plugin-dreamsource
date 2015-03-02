@@ -37,7 +37,9 @@
 
 #include "gstdreamsource-marshal.h"
 
-#define CONTROL_STOP            'S'     /* stop the select call */
+#define CONTROL_RUN            'R'     /* start producing frames */
+#define CONTROL_PAUSE          'P'     /* pause producing frames */
+#define CONTROL_STOP           'S'     /* stop the select call */
 #define CONTROL_SOCKETS(src)   src->control_sock
 #define WRITE_SOCKET(src)      src->control_sock[1]
 #define READ_SOCKET(src)       src->control_sock[0]
@@ -58,6 +60,14 @@ G_STMT_START {                              \
 G_STMT_START {                                 \
   res = read(READ_SOCKET(src), &command, 1);   \
 } G_STMT_END
+
+typedef enum
+{
+	READTHREADSTATE_NONE = 0,
+	READTRREADSTATE_PAUSED,
+	READTRREADSTATE_RUNNING,
+	READTHREADSTATE_STOP
+} GstDreamSourceReadthreadState;
 
 G_BEGIN_DECLS
 

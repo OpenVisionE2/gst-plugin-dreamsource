@@ -64,7 +64,7 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_WIDTH       1280
 #define DEFAULT_HEIGHT      720
 #define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
-#define DEFAULT_BUFFER_SIZE 16
+#define DEFAULT_BUFFER_SIZE 24
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -625,6 +625,7 @@ static gboolean gst_dreamvideosource_unlock_stop (GstBaseSrc * bsrc)
 static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 {
 	EncoderInfo *enc = self->encoder;
+	GstDreamSourceReadthreadState state = READTHREADSTATE_NONE;
 	GstBuffer *readbuf;
 
 	if (!enc) {
@@ -645,29 +646,32 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 	GST_DEBUG_OBJECT (self, "posting ENTER stream status");
 	gst_element_post_message (GST_ELEMENT_CAST (self), message);
 	GstClockTime clock_time, base_time;
+	gboolean discont = TRUE;
 
 	while (TRUE) {
 		readbuf = NULL;
 		{
+			if (state == READTHREADSTATE_STOP)
+				goto stop_running;
+
 			struct pollfd rfd[2];
 			int timeout, nfds;
 
 			rfd[0].fd = READ_SOCKET (self);
 			rfd[0].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
+			rfd[1].revents = 0;
+			rfd[1].events = POLLIN;
+			nfds = 1;
+			timeout = 0;
 
-			if (self->descriptors_available == 0)
+			if (state <= READTRREADSTATE_PAUSED)
+				timeout = 200;
+			else if (state == READTRREADSTATE_RUNNING && self->descriptors_available == 0)
 			{
 				rfd[1].fd = enc->fd;
-				rfd[1].events = POLLIN;
 				self->descriptors_count = 0;
 				timeout = 200;
 				nfds = 2;
-			}
-			else
-			{
-				rfd[1].revents = 0;
-				nfds = 1;
-				timeout = 0;
 			}
 
 			int ret = poll(rfd, nfds, timeout);
@@ -679,8 +683,8 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			}
 			else if ( ret == 0 && self->descriptors_available == 0 )
 			{
-				gst_clock_get_internal_time(self->encoder_clock);
 				g_mutex_lock (&self->mutex);
+				gst_clock_get_internal_time(self->encoder_clock);
 				if (self->flushing)
 				{
 					GST_DEBUG_OBJECT (self, "FLUSHING!");
@@ -690,17 +694,30 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				}
 				g_mutex_unlock (&self->mutex);
 				GST_DEBUG_OBJECT (self, "SELECT TIMEOUT");
+				discont = TRUE;
 // 				readbuf = gst_buffer_new();
 			}
 			else if ( rfd[0].revents )
 			{
 				char command;
 				READ_COMMAND (self, command, ret);
-				if (command == CONTROL_STOP)
-				{
-					GST_DEBUG_OBJECT (self, "CONTROL_STOP!");
-					goto stop_running;
+				switch (command) {
+					case CONTROL_STOP:
+						GST_DEBUG_OBJECT (self, "CONTROL_STOP!");
+						state = READTHREADSTATE_STOP;
+						break;
+					case CONTROL_PAUSE:
+						GST_DEBUG_OBJECT (self, "CONTROL_PAUSE!");
+						state = READTRREADSTATE_PAUSED;
+						break;
+					case CONTROL_RUN:
+						GST_DEBUG_OBJECT (self, "CONTROL_RUN");
+						state = READTRREADSTATE_RUNNING;
+						break;
+					default:
+						GST_ERROR_OBJECT (self, "illegal control socket command %c received!", command);
 				}
+				continue;
 			}
 			else if ( G_LIKELY(rfd[1].revents & POLLIN) )
 			{
@@ -712,11 +729,6 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				}
 				clock_time = gst_clock_get_internal_time (self->encoder_clock);
 				base_time = gst_element_get_base_time(GST_ELEMENT(self));
-				if (G_UNLIKELY (base_time == 0))
-				{
-					GST_DEBUG_OBJECT (self, "base_time not known... continue");
-					continue;
-				}
 				if (rlen <= 0 || rlen % VBDSIZE ) {
 					if ( errno == 512 )
 						goto stop_running;
@@ -781,12 +793,16 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				g_mutex_unlock (&self->mutex);
 			}
 
+			g_mutex_lock (&self->mutex);
 			if (G_UNLIKELY (self->dts_valid == FALSE))
 			{
 				GST_DEBUG_OBJECT (self, "dts_valid not set, skipping frame...");
 				self->descriptors_count++;
+				g_mutex_unlock (&self->mutex);
 				break;
 			}
+			else
+				g_mutex_unlock (&self->mutex);
 
 // 			if (self->video_info.fps_d)
 // 				GST_BUFFER_DURATION(readbuf) = gst_util_uint64_scale (GST_SECOND, self->video_info.fps_d, self->video_info.fps_n);
@@ -895,6 +911,12 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 					GstBuffer * oldbuf = g_queue_pop_head (&self->current_frames);
 					GST_WARNING_OBJECT (self, "dropping %" GST_PTR_FORMAT " because of queue overflow! buffers count=%i", oldbuf, g_queue_get_length (&self->current_frames));
 					gst_buffer_unref(oldbuf);
+					GST_BUFFER_FLAG_SET ((GstBuffer *) g_queue_peek_head (&self->current_frames), GST_BUFFER_FLAG_DISCONT);
+				}
+				if (discont)
+				{
+					GST_BUFFER_FLAG_SET (readbuf, GST_BUFFER_FLAG_DISCONT);
+					discont = FALSE;
 				}
 				g_queue_push_tail (&self->current_frames, readbuf);
 				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
@@ -991,6 +1013,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			g_mutex_lock (&self->mutex);
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
+			SEND_COMMAND (self, CONTROL_RUN);
 			self->dts_valid = FALSE;
 			GstClock *pipeline_clock = gst_element_get_clock (GST_ELEMENT (self));
 			if (pipeline_clock)
@@ -1027,6 +1050,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			g_mutex_lock (&self->mutex);
 			self->flushing = TRUE;
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
+			SEND_COMMAND (self, CONTROL_PAUSE);
 			while (self->descriptors_count < self->descriptors_available)
 			{
 				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i");
@@ -1057,7 +1081,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			break;
 		case GST_STATE_CHANGE_READY_TO_NULL:
 			gst_dreamvideosource_encoder_release (self);
-			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_READY_TO_NULL, close control sockets");
+			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_READY_TO_NULL");
 			break;
 		default:
 			break;
