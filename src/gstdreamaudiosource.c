@@ -479,7 +479,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 	g_value_unset (&val);
 	GST_DEBUG_OBJECT (self, "posting ENTER stream status");
 	gst_element_post_message (GST_ELEMENT_CAST (self), message);
-	GstClockTime clock_time;
+	GstClockTime clock_time, base_time;
 
 	while (TRUE) {
 		readbuf = NULL;
@@ -542,6 +542,12 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 			else if ( G_LIKELY(rfd[1].revents & POLLIN) )
 			{
 				clock_time = gst_clock_get_internal_time (self->encoder_clock);
+				base_time = gst_element_get_base_time(GST_ELEMENT(self));
+				if (G_UNLIKELY (base_time == 0))
+				{
+					GST_DEBUG_OBJECT (self, "base_time not known... continue");
+					continue;
+				}
 				int rlen = read(enc->fd, enc->buffer, ABUFSIZE);
 				if (rlen <= 0 || rlen % ABDSIZE ) {
 					if ( errno == 512 )
@@ -556,9 +562,8 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 
 		while (self->descriptors_count < self->descriptors_available)
 		{
-			GstClockTime base_time = gst_element_get_base_time(GST_ELEMENT(self));
 			GstClockTime encoder_pts = GST_CLOCK_TIME_NONE;
-			gint64 dts_pts_offset;
+			GstClockTime result_pts = GST_CLOCK_TIME_NONE;
 
 			off_t offset = self->descriptors_count * ABDSIZE;
 			AudioBufferDescriptor *desc = (AudioBufferDescriptor*)(&enc->buffer[offset]);
@@ -570,13 +575,6 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				GST_LOG_OBJECT (self, "CDB_FLAG_METADATA... skip outdated packet");
 				self->descriptors_count = self->descriptors_available;
 				continue;
-			}
-
-			struct _buffer_memorytracker * memtrack = malloc(sizeof(struct _buffer_memorytracker));
-			if (G_UNLIKELY (!memtrack))
-			{
-				GST_ERROR_OBJECT (self, "can't allocate buffer_memorytracker");
-				goto stop_running;
 			}
 
 			GST_LOG_OBJECT (self, "descriptors_count=%d, descriptors_available=%d\tuiOffset=%d, uiLength=%d", self->descriptors_count, self->descriptors_available, desc->stCommon.uiOffset, desc->stCommon.uiLength);
@@ -630,14 +628,6 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				break;
 			}
 
-			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
-
-			memtrack->self = self;
-			memtrack->buffer = readbuf;
-			memtrack->uiOffset = desc->stCommon.uiOffset;
-			memtrack->uiLength = desc->stCommon.uiLength;
-			self->memtrack_list = g_list_append(self->memtrack_list, memtrack);
-
 			if (encoder_pts != GST_CLOCK_TIME_NONE)
 			{
 				GstClockTime pts_clock_time = encoder_pts - self->dts_offset;
@@ -646,6 +636,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				GstClockTimeDiff diff;
 
 				gst_clock_get_calibration (self->encoder_clock, &internal, &external, &rate_n, &rate_d);
+
 				if (internal > pts_clock_time) {
 					diff = internal - pts_clock_time;
 					diff = gst_util_uint64_scale (diff, rate_n, rate_d);
@@ -656,18 +647,53 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 					pts_clock_time = external + diff;
 				}
 
-				GST_BUFFER_DTS(readbuf) = pts_clock_time - base_time;
-				GST_BUFFER_PTS(readbuf) = pts_clock_time - base_time;
+				result_pts = pts_clock_time - base_time;
 
-GST_LOG_OBJECT (self, "post-calibration\n"
-"%" GST_TIME_FORMAT "=base_time       %" GST_TIME_FORMAT "=clock_time\n"
-"%" GST_TIME_FORMAT "=encoder_pts     %" GST_TIME_FORMAT "=pts_clock_time     %" GST_TIME_FORMAT "=GST_BUFFER_PTS\n"
-,
-	GST_TIME_ARGS (base_time), GST_TIME_ARGS (clock_time),
-	GST_TIME_ARGS (encoder_pts), GST_TIME_ARGS (pts_clock_time), GST_TIME_ARGS (GST_BUFFER_PTS(readbuf))
-);
+#define extra_timestamp_debug
+#ifdef extra_timestamp_debug
+				GstClockTime my_int_time = gst_clock_get_internal_time(self->encoder_clock);
+				GstClockTime pipeline_int_time = GST_CLOCK_TIME_NONE;
+				GstClock *elemclk = gst_element_get_clock (GST_ELEMENT (self));
+				if (elemclk)
+				{
+					pipeline_int_time = gst_clock_get_internal_time(elemclk);
+					gst_object_unref (elemclk);
+				}
+
+				GST_LOG_OBJECT (self, "post-calibration\n"
+				"%" GST_TIME_FORMAT "=base_time       %" GST_TIME_FORMAT "=clock_time\n"
+				"%" GST_TIME_FORMAT "=encoder_pts     %" GST_TIME_FORMAT "=pts_clock_time     %" GST_TIME_FORMAT "=result_pts\n"
+				"%" GST_TIME_FORMAT "=internal        %" GST_TIME_FORMAT "=external           %" GST_TIME_FORMAT "=diff\n"
+				"%" GST_TIME_FORMAT "=rate_n          %" GST_TIME_FORMAT "=rate_d\n"
+				"%" GST_TIME_FORMAT "=my_int_time     %" GST_TIME_FORMAT "=pipeline_int_time\n"
+				,
+				GST_TIME_ARGS (base_time), GST_TIME_ARGS (clock_time),
+				GST_TIME_ARGS (encoder_pts), GST_TIME_ARGS (pts_clock_time), GST_TIME_ARGS (result_pts),
+				GST_TIME_ARGS (internal), GST_TIME_ARGS (external), GST_TIME_ARGS (diff),
+				GST_TIME_ARGS (rate_n), GST_TIME_ARGS (rate_d),
+				GST_TIME_ARGS (my_int_time), GST_TIME_ARGS (pipeline_int_time)
+				);
+#endif
 			}
 
+			struct _buffer_memorytracker * memtrack = malloc(sizeof(struct _buffer_memorytracker));
+			if (G_UNLIKELY (!memtrack))
+			{
+				GST_ERROR_OBJECT (self, "can't allocate buffer_memorytracker");
+				goto stop_running;
+			}
+
+			GST_OBJECT_LOCK (self);
+			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
+			memtrack->self = self;
+			memtrack->buffer = readbuf;
+			memtrack->uiOffset = desc->stCommon.uiOffset;
+			memtrack->uiLength = desc->stCommon.uiLength;
+			self->memtrack_list = g_list_append(self->memtrack_list, memtrack);
+			GST_OBJECT_UNLOCK (self);
+
+			if (result_pts != GST_CLOCK_TIME_NONE)
+				GST_BUFFER_DTS(readbuf) = result_pts;
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
 			GST_LOG_OBJECT (self, "read %i dumped %i total %" G_GSIZE_FORMAT " ", desc->stCommon.uiLength, wret, gst_buffer_get_size (*outbuf) );
@@ -788,7 +814,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 				if (pipeline_clock != self->encoder_clock)
 				{
 					gst_clock_set_master (self->encoder_clock, pipeline_clock);
-					GST_DEBUG_OBJECT (self, "slaved to pipeline_clock %" GST_PTR_FORMAT "", pipeline_clock);
+					GST_DEBUG_OBJECT (self, "slaved %" GST_PTR_FORMAT "to pipeline_clock %" GST_PTR_FORMAT "", self->encoder_clock, pipeline_clock);
 				}
 				else
 					GST_DEBUG_OBJECT (self, "encoder_clock is master clock");
