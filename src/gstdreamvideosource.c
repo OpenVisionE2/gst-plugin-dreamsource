@@ -64,7 +64,7 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_WIDTH       1280
 #define DEFAULT_HEIGHT      720
 #define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
-#define DEFAULT_BUFFER_SIZE 24
+#define DEFAULT_BUFFER_SIZE 30
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -85,6 +85,7 @@ G_DEFINE_TYPE (GstDreamVideoSource, gst_dreamvideosource, GST_TYPE_PUSH_SRC);
 static GstCaps *gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter);
 static gboolean gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps);
 static GstCaps *gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps);
+static gboolean gst_dreamvideosource_query (GstBaseSrc * bsrc, GstQuery * query);
 
 static gboolean gst_dreamvideosource_unlock (GstBaseSrc * bsrc);
 static gboolean gst_dreamvideosource_unlock_stop (GstBaseSrc * bsrc);
@@ -136,6 +137,7 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 
 	gstbsrc_class->get_caps = gst_dreamvideosource_getcaps;
  	gstbsrc_class->set_caps = gst_dreamvideosource_setcaps;
+	gstbsrc_class->query = gst_dreamvideosource_query;
  	gstbsrc_class->fixate = gst_dreamvideosource_fixate;
 	gstbsrc_class->unlock = gst_dreamvideosource_unlock;
 	gstbsrc_class->unlock_stop = gst_dreamvideosource_unlock_stop;
@@ -598,6 +600,37 @@ gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 	return caps;
 }
 
+static gboolean gst_dreamvideosource_query (GstBaseSrc * bsrc, GstQuery * query)
+{
+	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
+	gboolean ret = TRUE;
+
+	switch (GST_QUERY_TYPE (query)) {
+		case GST_QUERY_LATENCY:{
+			if (self->readthread) {
+				GstClockTime min, max;
+
+				g_mutex_lock (&self->mutex);
+				min = gst_util_uint64_scale_ceil (GST_SECOND, self->video_info.fps_d, self->video_info.fps_n);
+				g_mutex_unlock (&self->mutex);
+
+				max = self->buffer_size * min;
+
+				gst_query_set_latency (query, TRUE, min, max);
+				GST_DEBUG_OBJECT (bsrc, "set LATENCY QUERY %" GST_PTR_FORMAT, query);
+				ret = TRUE;
+			} else {
+				ret = FALSE;
+			}
+			break;
+		}
+		default:
+			ret = GST_BASE_SRC_CLASS (parent_class)->query (bsrc, query);
+			break;
+	}
+	return ret;
+}
+
 static gboolean gst_dreamvideosource_unlock (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
@@ -1013,7 +1046,6 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			g_mutex_lock (&self->mutex);
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
-			SEND_COMMAND (self, CONTROL_RUN);
 			self->dts_valid = FALSE;
 			GstClock *pipeline_clock = gst_element_get_clock (GST_ELEMENT (self));
 			if (pipeline_clock)
@@ -1035,7 +1067,6 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 				goto fail;
 			self->descriptors_available = 0;
 			CLEAR_COMMAND (self);
-			GST_INFO_OBJECT (self, "started encoder!");
 			g_mutex_unlock (&self->mutex);
 			break;
 		default:
@@ -1046,6 +1077,12 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 		sret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
 
 	switch (transition) {
+		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+			g_mutex_lock (&self->mutex);
+			SEND_COMMAND (self, CONTROL_RUN);
+			GST_INFO_OBJECT (self, "started encoder!");
+			g_mutex_unlock (&self->mutex);
+			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
 			g_mutex_lock (&self->mutex);
 			self->flushing = TRUE;
@@ -1071,6 +1108,8 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_PAUSED_TO_READY");
 #ifdef PROVIDE_CLOCK
 			gst_element_post_message (element, gst_message_new_clock_lost (GST_OBJECT_CAST (element), self->encoder_clock));
+			if (!self->dreamaudiosrc)
+				gst_clock_set_calibration (self->encoder_clock, 0, 0, 1, 1);
 #endif
 			GST_DEBUG_OBJECT (self, "stopping readthread @%p...", self->readthread);
 			SEND_COMMAND (self, CONTROL_STOP);

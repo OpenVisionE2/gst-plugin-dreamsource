@@ -58,8 +58,9 @@ enum
 static guint gst_dreamaudiosource_signals[LAST_SIGNAL] = { 0 };
 
 #define DEFAULT_BITRATE     128
+#define DEFAULT_SAMPLERATE  48000
 #define DEFAULT_INPUT_MODE  GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE
-#define DEFAULT_BUFFER_SIZE 16
+#define DEFAULT_BUFFER_SIZE 58
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -67,7 +68,8 @@ static GstStaticPadTemplate srctemplate =
 	GST_PAD_ALWAYS,
 	GST_STATIC_CAPS	("audio/mpeg, "
 	"mpegversion = 4,"
-	"stream-format = (string) adts")
+	"stream-format = (string) adts,"
+	"rate = 48000")
     );
 
 #define gst_dreamaudiosource_parent_class parent_class
@@ -76,6 +78,8 @@ G_DEFINE_TYPE (GstDreamAudioSource, gst_dreamaudiosource, GST_TYPE_PUSH_SRC);
 static GstCaps *gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter);
 static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc);
 static gboolean gst_dreamaudiosource_unlock_stop (GstBaseSrc * bsrc);
+static gboolean gst_dreamaudiosource_query (GstBaseSrc * bsrc, GstQuery * query);
+
 static void gst_dreamaudiosource_dispose (GObject * gobject);
 static GstFlowReturn gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf);
 
@@ -125,6 +129,7 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 	gstbasesrc_class->get_caps = gst_dreamaudiosource_getcaps;
 	gstbasesrc_class->unlock = gst_dreamaudiosource_unlock;
 	gstbasesrc_class->unlock_stop = gst_dreamaudiosource_unlock_stop;
+	gstbasesrc_class->query = gst_dreamaudiosource_query;
 
 	gstpush_src_class->create = gst_dreamaudiosource_create;
 
@@ -309,6 +314,7 @@ static gboolean gst_dreamaudiosource_encoder_init (GstDreamAudioSource * self)
 	self->encoder->used_range_min = UINT32_MAX;
 	self->encoder->used_range_max = 0;
 
+	self->audio_info.samplerate = DEFAULT_SAMPLERATE;
 	gst_dreamaudiosource_set_bitrate (self, self->audio_info.bitrate);
 	gst_dreamaudiosource_set_input_mode (self, self->input_mode);
 
@@ -403,6 +409,36 @@ gst_dreamaudiosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 
 	GST_DEBUG_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
 	return caps;
+}
+
+static gboolean gst_dreamaudiosource_query (GstBaseSrc * bsrc, GstQuery * query)
+{
+	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
+	gboolean ret = TRUE;
+	switch (GST_QUERY_TYPE (query)) {
+		case GST_QUERY_LATENCY:{
+			if (self->readthread) {
+				GstClockTime min, max;
+
+				g_mutex_lock (&self->mutex);
+				min = gst_util_uint64_scale_ceil (GST_SECOND, 1000, self->audio_info.samplerate);
+				g_mutex_unlock (&self->mutex);
+
+				max = self->buffer_size * min;
+
+				gst_query_set_latency (query, TRUE, min, max);
+				GST_DEBUG_OBJECT (bsrc, "set LATENCY QUERY %" GST_PTR_FORMAT, query);
+				ret = TRUE;
+			} else {
+				ret = FALSE;
+			}
+			break;
+		}
+		default:
+			ret = GST_BASE_SRC_CLASS (parent_class)->query (bsrc, query);
+			break;
+	}
+	return ret;
 }
 
 static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc)
@@ -705,7 +741,10 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 			GST_OBJECT_UNLOCK (self);
 
 			if (result_pts != GST_CLOCK_TIME_NONE)
+			{
+				GST_BUFFER_PTS(readbuf) = result_pts;
 				GST_BUFFER_DTS(readbuf) = result_pts;
+			}
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
 			GST_LOG_OBJECT (self, "read %i dumped %i total %" G_GSIZE_FORMAT " ", desc->stCommon.uiLength, wret, gst_buffer_get_size (*outbuf) );
@@ -826,7 +865,6 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			g_mutex_lock (&self->mutex);
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_PAUSED_TO_PLAYING");
-			SEND_COMMAND (self, CONTROL_RUN);
 			GstClock *pipeline_clock = gst_element_get_clock (GST_ELEMENT (self));
 			if (pipeline_clock)
 			{
@@ -845,7 +883,6 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 				goto fail;
 			self->descriptors_available = 0;
 			CLEAR_COMMAND (self);
-			GST_INFO_OBJECT (self, "started encoder!");
 			g_mutex_unlock (&self->mutex);
 			break;
 		default:
@@ -856,6 +893,12 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 		sret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
 
 	switch (transition) {
+		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+			g_mutex_lock (&self->mutex);
+			SEND_COMMAND (self, CONTROL_RUN);
+			GST_INFO_OBJECT (self, "started encoder!");
+			g_mutex_unlock (&self->mutex);
+			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
 			g_mutex_lock (&self->mutex);
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
@@ -880,6 +923,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 			GST_DEBUG_OBJECT (self,"GST_STATE_CHANGE_PAUSED_TO_READY");
 #ifdef PROVIDE_CLOCK
 			gst_element_post_message (element, gst_message_new_clock_lost (GST_OBJECT_CAST (element), self->encoder_clock));
+			gst_clock_set_calibration (self->encoder_clock, 0, 0, 1, 1);
 #endif
 			GST_DEBUG_OBJECT (self, "stopping readthread @%p...", self->readthread);
 			SEND_COMMAND (self, CONTROL_STOP);

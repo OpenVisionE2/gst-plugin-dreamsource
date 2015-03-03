@@ -33,6 +33,7 @@ struct _AudioBufferDescriptor
 
 struct _AudioFormatInfo {
 	gint bitrate;
+	gint samplerate;
 };
 
 #define ABDSIZE		sizeof(AudioBufferDescriptor)
