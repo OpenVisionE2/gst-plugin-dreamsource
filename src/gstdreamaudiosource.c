@@ -340,7 +340,6 @@ static void gst_dreamaudiosource_encoder_release (GstDreamAudioSource * self)
 			close(self->encoder->fd);
 		free(self->encoder);
 	}
-	g_list_free(self->memtrack_list);
 	self->encoder = NULL;
 	close (READ_SOCKET (self));
 	close (WRITE_SOCKET (self));
@@ -477,19 +476,22 @@ static void gst_dreamaudiosource_free_buffer (struct _buffer_memorytracker * mem
 	int count = 0;
 	self->memtrack_list = g_list_remove(list, memtrack);
 	free(memtrack);
-	list = g_list_first (self->memtrack_list);
-	while (list) {
-		mt = list->data;
-		if (abs_minimum > 0 && mt->uiOffset < abs_minimum)
-			abs_minimum = mt->uiOffset;
-		if (mt->uiOffset+mt->uiLength > abs_maximum)
-			abs_maximum = mt->uiOffset+mt->uiLength;
-		count++;
-		list = g_list_next (list);
+	if (self->encoder)
+	{
+		list = g_list_first (self->memtrack_list);
+		while (list) {
+			mt = list->data;
+			if (abs_minimum > 0 && mt->uiOffset < abs_minimum)
+				abs_minimum = mt->uiOffset;
+			if (mt->uiOffset+mt->uiLength > abs_maximum)
+				abs_maximum = mt->uiOffset+mt->uiLength;
+			count++;
+			list = g_list_next (list);
+		}
+		GST_TRACE_OBJECT (self, "new abs_minimum=%i, abs_maximum=%i", abs_minimum, abs_maximum);
+		self->encoder->used_range_min = abs_minimum;
+		self->encoder->used_range_max = abs_maximum;
 	}
-	GST_TRACE_OBJECT (self, "new abs_minimum=%i, abs_maximum=%i", abs_minimum, abs_maximum);
-	self->encoder->used_range_min = abs_minimum;
-	self->encoder->used_range_max = abs_maximum;
 	GST_OBJECT_UNLOCK(self);
 }
 
@@ -815,13 +817,13 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (psrc);
 
-	GST_LOG_OBJECT (self, "new buffer requested");
+	GST_LOG_OBJECT (self, "new buffer requested. queue has %i buffers", g_queue_get_length (&self->current_frames));
 
 	g_mutex_lock (&self->mutex);
 	while (g_queue_is_empty (&self->current_frames) && !self->flushing)
 	{
-		g_cond_wait (&self->cond, &self->mutex);
 		GST_INFO_OBJECT (self, "waiting for buffer from encoder");
+		g_cond_wait (&self->cond, &self->mutex);
 	}
 
 	*outbuf = g_queue_pop_head (&self->current_frames);
@@ -829,7 +831,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 	if (*outbuf)
 	{
-		GST_INFO_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
+		GST_INFO_OBJECT (self, "pushing %" GST_PTR_FORMAT ". queue has %i buffers", *outbuf, g_queue_get_length (&self->current_frames));
 		return GST_FLOW_OK;
 	}
 	GST_INFO_OBJECT (self, "FLUSHING");
@@ -942,7 +944,7 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 
 	return sret;
 fail:
-	GST_ERROR_OBJECT(self,"can't perform encoder ioctl!");
+	GST_ERROR_OBJECT(self,"can't perform encoder ioctl! error: %s (%i)", strerror(errno), errno);
 	g_mutex_unlock (&self->mutex);
 	return GST_STATE_CHANGE_FAILURE;
 }
@@ -954,6 +956,7 @@ gst_dreamaudiosource_dispose (GObject * gobject)
 #ifdef dump
 	close(self->dumpfd);
 #endif
+	g_list_free(self->memtrack_list);
 	g_mutex_clear (&self->mutex);
 	g_cond_clear (&self->cond);
 	GST_DEBUG_OBJECT (self, "disposed");

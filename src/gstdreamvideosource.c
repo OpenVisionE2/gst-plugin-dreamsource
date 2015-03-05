@@ -952,11 +952,12 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 					discont = FALSE;
 				}
 				g_queue_push_tail (&self->current_frames, readbuf);
-				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
+				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue...", readbuf );
+				g_cond_signal (&self->cond);
 			}
 			else
 				gst_buffer_unref(readbuf);
-			g_cond_signal (&self->cond);
+// 			g_cond_signal (&self->cond);
 			g_mutex_unlock (&self->mutex);
 		}
 	}
@@ -985,13 +986,13 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (psrc);
 
-	GST_LOG_OBJECT (self, "new buffer requested");
+	GST_LOG_OBJECT (self, "new buffer requested. queue has %i buffers", g_queue_get_length (&self->current_frames));
 
 	g_mutex_lock (&self->mutex);
 	while (g_queue_is_empty (&self->current_frames) && !self->flushing)
 	{
-		g_cond_wait (&self->cond, &self->mutex);
 		GST_INFO_OBJECT (self, "waiting for buffer from encoder");
+		g_cond_wait (&self->cond, &self->mutex);
 	}
 
 	*outbuf = g_queue_pop_head (&self->current_frames);
@@ -999,7 +1000,7 @@ gst_dreamvideosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
 	if (*outbuf)
 	{
-		GST_INFO_OBJECT (self, "pushing %" GST_PTR_FORMAT "", *outbuf );
+		GST_INFO_OBJECT (self, "pushing %" GST_PTR_FORMAT ". queue has %i buffers", *outbuf, g_queue_get_length (&self->current_frames));
 		return GST_FLOW_OK;
 	}
 	GST_INFO_OBJECT (self, "FLUSHING");
@@ -1128,7 +1129,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 
 	return sret;
 fail:
-	GST_ERROR_OBJECT(self,"can't perform encoder ioctl!");
+	GST_ERROR_OBJECT(self,"can't perform encoder ioctl! error: %s (%i)", strerror(errno), errno);
 	g_mutex_unlock (&self->mutex);
 	return GST_STATE_CHANGE_FAILURE;
 }
