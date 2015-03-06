@@ -87,7 +87,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 {
 	GstDreamSourceClock *self = GST_DREAMSOURCE_CLOCK (clock);
 
-	uint32_t stc;
+	uint32_t stc = 0;
 	GstClockTime encoder_time = 0;
 
 	GST_OBJECT_LOCK(self);
