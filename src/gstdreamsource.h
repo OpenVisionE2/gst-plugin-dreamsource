@@ -46,8 +46,8 @@
 
 #define CLEAR_COMMAND(src)                  \
 G_STMT_START {                              \
-  char c; ssize_t res;                      \
-  res = read(READ_SOCKET(src), &c, 1);      \
+  char c;                                   \
+  read(READ_SOCKET(src), &c, 1);            \
 } G_STMT_END
 
 #define SEND_COMMAND(src, command)          \

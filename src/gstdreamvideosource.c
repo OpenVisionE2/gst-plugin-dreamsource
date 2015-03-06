@@ -328,7 +328,6 @@ gst_dreamvideosource_plugin_init (GstPlugin *plugin)
 static void
 gst_dreamvideosource_init (GstDreamVideoSource * self)
 {
-	GstPadTemplate *pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
 	self->current_caps = NULL;
 	self->new_caps = NULL;
 
@@ -387,7 +386,7 @@ static gboolean gst_dreamvideosource_encoder_init (GstDreamVideoSource * self)
 	self->encoder->cdb = (unsigned char *)mmap (0, VMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
 
 	if (!self->encoder->cdb || self->encoder->cdb == MAP_FAILED) {
-		GST_ERROR_OBJECT(self,"cannot alloc buffer: %s (%d)", strerror(errno));
+		GST_ERROR_OBJECT(self, "cannot alloc buffer: %s (%i)", strerror(errno), errno);
 		self->encoder->cdb = NULL;
 		return FALSE;
 	}
@@ -522,13 +521,11 @@ static gboolean
 gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	GstBaseSrcClass *bclass = GST_BASE_SRC_GET_CLASS (bsrc);
 	GstCaps *current_caps;
 	const GstStructure *structure;
 	VideoFormatInfo info;
 	gboolean ret;
-	int width, height;
-	const GValue *framerate, *par;
+	const GValue *framerate;
 
 	g_mutex_lock (&self->mutex);
 	structure = gst_caps_get_structure (caps, 0);
@@ -596,7 +593,7 @@ gst_dreamvideosource_fixate (GstBaseSrc * bsrc, GstCaps * caps)
 		gst_structure_fixate_field_nearest_fraction (structure, "display-aspect-ratio", DEFAULT_WIDTH, DEFAULT_HEIGHT);
 
 	caps = GST_BASE_SRC_CLASS (parent_class)->fixate (bsrc, caps);
-	GST_DEBUG_OBJECT (bsrc, "fixated caps: %" GST_PTR_FORMAT, caps);
+	GST_DEBUG_OBJECT (self, "fixated caps: %" GST_PTR_FORMAT, caps);
 	return caps;
 }
 
@@ -607,7 +604,7 @@ static gboolean gst_dreamvideosource_query (GstBaseSrc * bsrc, GstQuery * query)
 
 	switch (GST_QUERY_TYPE (query)) {
 		case GST_QUERY_LATENCY:{
-			if (self->readthread) {
+			if (self->video_info.fps_n) {
 				GstClockTime min, max;
 
 				g_mutex_lock (&self->mutex);
@@ -1089,11 +1086,8 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			self->flushing = TRUE;
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
 			SEND_COMMAND (self, CONTROL_PAUSE);
-			while (self->descriptors_count < self->descriptors_available)
-			{
-				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i");
-				self->descriptors_count++;
-			}
+			if (self->descriptors_count < self->descriptors_available)
+				self->descriptors_count = self->descriptors_available;
 			if (self->descriptors_count)
 				write(self->encoder->fd, &self->descriptors_count, sizeof(self->descriptors_count));
 			ret = ioctl(self->encoder->fd, VENC_STOP);

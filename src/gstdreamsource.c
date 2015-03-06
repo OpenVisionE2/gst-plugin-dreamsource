@@ -79,7 +79,7 @@ gst_dreamsource_clock_new (const gchar * name, int fd)
 {
 	GstDreamSourceClock *self = GST_DREAMSOURCE_CLOCK (g_object_new (GST_TYPE_DREAMSOURCE_CLOCK, "name", name, "clock-type", GST_CLOCK_TYPE_OTHER, NULL));
 	self->fd = fd;
-	GST_INFO_OBJECT (self, "gst_dreamsource_clock_new fd=%i", self->fd);
+	GST_DEBUG_OBJECT (self, "gst_dreamsource_clock_new fd=%i", self->fd);
 	return GST_CLOCK_CAST (self);
 }
 
@@ -95,7 +95,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 		int ret = ioctl(self->fd, ENC_GET_STC, &stc);
 		if (ret == 0)
 		{
-			GST_LOG_OBJECT (self, "current stc=%" GST_TIME_FORMAT "", GST_TIME_ARGS(ENCTIME_TO_GSTTIME(stc)));
+			GST_TRACE_OBJECT (self, "current stc=%" GST_TIME_FORMAT "", GST_TIME_ARGS(ENCTIME_TO_GSTTIME(stc)));
 			if (G_UNLIKELY(self->first_stc == 0))
 				self->first_stc = stc;
 
@@ -104,7 +104,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 			if (stc < self->prev_stc)
 			{
 				self->stc_offset += UINT32_MAX;
-				GST_DEBUG_OBJECT (self, "clock_wrap! new offset=%" PRIu64 " ", self->stc_offset);
+				GST_LOG_OBJECT (self, "clock_wrap! new offset=%" PRIu64 " ", self->stc_offset);
 			}
 
 			self->prev_stc = stc;
@@ -112,7 +112,7 @@ static GstClockTime gst_dreamsource_clock_get_internal_time (GstClock * clock)
 			uint64_t total_stc = stc + self->stc_offset;
 // 			GST_WARNING_OBJECT (self, "after subtract stc_offset=%" PRIu64 "   new total_stc=%" PRIu64 "", self->stc_offset, total_stc);
 			encoder_time = ENCTIME_TO_GSTTIME(total_stc);
-			GST_LOG_OBJECT (self, "result %" GST_TIME_FORMAT "", GST_TIME_ARGS(encoder_time));
+			GST_TRACE_OBJECT (self, "result %" GST_TIME_FORMAT "", GST_TIME_ARGS(encoder_time));
 		}
 		else
 			GST_WARNING_OBJECT (self, "can't ENC_GET_STC error: %s, fd=%i, ret=%i", strerror(errno), self->fd, ret);

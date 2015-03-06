@@ -294,7 +294,7 @@ static gboolean gst_dreamaudiosource_encoder_init (GstDreamAudioSource * self)
 	self->encoder->cdb = (unsigned char *)mmap (0, AMMAPSIZE, PROT_READ, MAP_PRIVATE, self->encoder->fd, 0);
 
 	if (!self->encoder->cdb || self->encoder->cdb == MAP_FAILED) {
-		GST_ERROR_OBJECT(self,"cannot alloc buffer: %s (%d)", strerror(errno));
+		GST_ERROR_OBJECT(self, "cannot alloc buffer: %s (%i)", strerror(errno), errno);
 		self->encoder->cdb = NULL;
 		return FALSE;
 	}
@@ -416,7 +416,7 @@ static gboolean gst_dreamaudiosource_query (GstBaseSrc * bsrc, GstQuery * query)
 	gboolean ret = TRUE;
 	switch (GST_QUERY_TYPE (query)) {
 		case GST_QUERY_LATENCY:{
-			if (self->readthread) {
+			if (self->audio_info.samplerate) {
 				GstClockTime min, max;
 
 				g_mutex_lock (&self->mutex);
@@ -905,11 +905,8 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 			g_mutex_lock (&self->mutex);
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
 			SEND_COMMAND (self, CONTROL_PAUSE);
-			while (self->descriptors_count < self->descriptors_available)
-			{
-				GST_LOG_OBJECT (self, "flushing self->descriptors_count=%i");
-				self->descriptors_count++;
-			}
+			if (self->descriptors_count < self->descriptors_available)
+				self->descriptors_count = self->descriptors_available;
 			if (self->descriptors_count)
 				write(self->encoder->fd, &self->descriptors_count, sizeof(self->descriptors_count));
 			ret = ioctl(self->encoder->fd, AENC_STOP);
