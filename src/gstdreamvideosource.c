@@ -484,11 +484,11 @@ static GstCaps *
 gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	GstCaps *caps;
+	GstCaps *caps = gst_caps_new_empty ();
 
 	if (self->new_caps)
 	{
-		GST_LOG_OBJECT (self, "gst_dreamvideosource_getcaps has new_caps %" GST_PTR_FORMAT "", self->new_caps);
+		GST_DEBUG_OBJECT (self, "gst_dreamvideosource_getcaps has new_caps: %" GST_PTR_FORMAT " / current_caps: %" GST_PTR_FORMAT "", self->new_caps, self->current_caps);
 		if (self->current_caps)
 		{
 			gst_caps_replace (&caps, self->new_caps);
