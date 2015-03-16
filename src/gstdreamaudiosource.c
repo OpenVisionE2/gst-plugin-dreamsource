@@ -697,7 +697,10 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 					pts_clock_time = external + diff;
 				}
 
-				result_pts = pts_clock_time - base_time;
+				if ( pts_clock_time >= base_time )
+					result_pts = pts_clock_time - base_time;
+				else
+					GST_DEBUG_OBJECT (self, "pts_clock_time < base_time, skipping frame...");
 
 #define extra_timestamp_debug
 #ifdef extra_timestamp_debug
@@ -733,17 +736,16 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				goto stop_running;
 			}
 
-			GST_OBJECT_LOCK (self);
-			readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
-			memtrack->self = self;
-			memtrack->buffer = readbuf;
-			memtrack->uiOffset = desc->stCommon.uiOffset;
-			memtrack->uiLength = desc->stCommon.uiLength;
-			self->memtrack_list = g_list_append(self->memtrack_list, memtrack);
-			GST_OBJECT_UNLOCK (self);
-
 			if (result_pts != GST_CLOCK_TIME_NONE)
 			{
+				GST_OBJECT_LOCK (self);
+				readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
+				memtrack->self = self;
+				memtrack->buffer = readbuf;
+				memtrack->uiOffset = desc->stCommon.uiOffset;
+				memtrack->uiLength = desc->stCommon.uiLength;
+				self->memtrack_list = g_list_append(self->memtrack_list, memtrack);
+				GST_OBJECT_UNLOCK (self);
 				GST_BUFFER_PTS(readbuf) = result_pts;
 				GST_BUFFER_DTS(readbuf) = result_pts;
 			}
