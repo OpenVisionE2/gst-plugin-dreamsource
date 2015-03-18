@@ -302,8 +302,8 @@ static gboolean gst_dreamaudiosource_encoder_init (GstDreamAudioSource * self)
 	int control_sock[2];
 	if (socketpair (PF_UNIX, SOCK_STREAM, 0, control_sock) < 0)
 	{
-		GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE, (NULL), GST_ERROR_SYSTEM);
-		return GST_STATE_CHANGE_FAILURE;
+		GST_ERROR_OBJECT(self, "cannot create control sockets: %s (%i)", strerror(errno), errno);
+		return FALSE;
 	}
 	READ_SOCKET (self) = control_sock[0];
 	WRITE_SOCKET (self) = control_sock[1];
@@ -850,7 +850,13 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 		case GST_STATE_CHANGE_NULL_TO_READY:
 		{
 			if (!gst_dreamaudiosource_encoder_init (self))
+			{
+				GError *err = g_error_new (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ, "Can't initialize encoder device");
+				GstMessage *msg = gst_message_new_error (GST_OBJECT (self), err, NULL);
+				gst_element_post_message (element, msg);
+				g_error_free (err);
 				return GST_STATE_CHANGE_FAILURE;
+			}
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_NULL_TO_READY");
 			break;
 		}
