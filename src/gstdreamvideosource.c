@@ -64,7 +64,7 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_WIDTH       1280
 #define DEFAULT_HEIGHT      720
 #define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
-#define DEFAULT_BUFFER_SIZE 30
+#define DEFAULT_BUFFER_SIZE 50
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",

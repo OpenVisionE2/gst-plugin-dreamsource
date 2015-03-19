@@ -60,7 +60,7 @@ static guint gst_dreamaudiosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_BITRATE     128
 #define DEFAULT_SAMPLERATE  48000
 #define DEFAULT_INPUT_MODE  GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE
-#define DEFAULT_BUFFER_SIZE 58
+#define DEFAULT_BUFFER_SIZE 80
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -499,7 +499,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 {
 	EncoderInfo *enc = self->encoder;
 	GstDreamSourceReadthreadState state = READTHREADSTATE_NONE;
-	GstBuffer *readbuf;
+	GstBuffer *readbuf = NULL;
 
 	if (!enc) {
 		GST_WARNING_OBJECT (self, "encoder device not opened!");
@@ -522,7 +522,6 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 	gboolean discont = TRUE;
 
 	while (TRUE) {
-		readbuf = NULL;
 		{
 			if (state == READTHREADSTATE_STOP)
 				goto stop_running;
@@ -736,22 +735,35 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				goto stop_running;
 			}
 
-			if (result_pts != GST_CLOCK_TIME_NONE)
+			if (readbuf)
+			{
+				GST_INFO_OBJECT (self, "LAST BUFFER WAS INCOMPLETE... appending");
+				GstBuffer *append_buffer = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
+				readbuf = gst_buffer_append (readbuf, append_buffer);
+			}
+			else
 			{
 				GST_OBJECT_LOCK (self);
 				readbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, enc->cdb, AMMAPSIZE, desc->stCommon.uiOffset, desc->stCommon.uiLength, memtrack, (GDestroyNotify) gst_dreamaudiosource_free_buffer);
+				if (desc->stCommon.uiLength == 0)
+				{
+					GST_WARNING_OBJECT (self, "ZERO SIZE BUFFER");
+				}
 				memtrack->self = self;
 				memtrack->buffer = readbuf;
 				memtrack->uiOffset = desc->stCommon.uiOffset;
 				memtrack->uiLength = desc->stCommon.uiLength;
 				self->memtrack_list = g_list_append(self->memtrack_list, memtrack);
 				GST_OBJECT_UNLOCK (self);
+			}
+			if (result_pts != GST_CLOCK_TIME_NONE)
+			{
 				GST_BUFFER_PTS(readbuf) = result_pts;
 				GST_BUFFER_DTS(readbuf) = result_pts;
 			}
 #ifdef dump
 			int wret = write(self->dumpfd, (unsigned char*)(enc->cdb + desc->stCommon.uiOffset), desc->stCommon.uiLength);
-			GST_LOG_OBJECT (self, "read %i dumped %i total %" G_GSIZE_FORMAT " ", desc->stCommon.uiLength, wret, gst_buffer_get_size (*outbuf) );
+			GST_LOG_OBJECT (self, "read=%i dumped=%i gst_buffer_get_size=%" G_GSIZE_FORMAT " ", desc->stCommon.uiLength, wret, gst_buffer_get_size (readbuf) );
 #endif
 			self->descriptors_count++;
 			break;
@@ -771,7 +783,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 		if (readbuf)
 		{
 			g_mutex_lock (&self->mutex);
-			if (!self->flushing)
+			if (gst_buffer_get_size (readbuf) && !self->flushing)
 			{
 				while (g_queue_get_length (&self->current_frames) >= self->buffer_size)
 				{
@@ -789,9 +801,13 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue", readbuf );
 			}
 			else
+			{
+				GST_INFO_OBJECT (self, "dropping %" GST_PTR_FORMAT " because %s", readbuf, self->flushing?"FLUSHING":"size = 0");
 				gst_buffer_unref(readbuf);
+			}
 			g_cond_signal (&self->cond);
 			g_mutex_unlock (&self->mutex);
+			readbuf = NULL;
 		}
 	}
 
