@@ -484,8 +484,9 @@ static GstCaps *
 gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	GstCaps *caps = gst_caps_new_empty ();
+	GstCaps *caps;
 
+	g_mutex_lock (&self->mutex);
 	if (self->new_caps)
 	{
 		GST_DEBUG_OBJECT (self, "gst_dreamvideosource_getcaps has new_caps: %" GST_PTR_FORMAT " / current_caps: %" GST_PTR_FORMAT "", self->new_caps, self->current_caps);
@@ -499,7 +500,11 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 	} else if (self->current_caps == NULL) {
 		GstPadTemplate *pad_template;
 		pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS(self), "src");
-		g_return_val_if_fail (pad_template != NULL, NULL);
+		if (pad_template)
+			caps = gst_caps_copy (gst_pad_template_get_caps (pad_template));
+		else
+			caps = gst_caps_new_empty ();
+
 		caps = gst_pad_template_get_caps (pad_template);
 	} else
 		caps = gst_caps_copy(self->current_caps);
@@ -514,6 +519,7 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 	}
 
 	GST_LOG_OBJECT (self, "return caps %" GST_PTR_FORMAT, caps);
+	g_mutex_unlock (&self->mutex);
 	return caps;
 }
 
