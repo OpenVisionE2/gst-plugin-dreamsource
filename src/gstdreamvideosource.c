@@ -63,7 +63,7 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_FRAMERATE   25
 #define DEFAULT_WIDTH       1280
 #define DEFAULT_HEIGHT      720
-#define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
+#define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_BACKGROUND
 #define DEFAULT_BUFFER_SIZE 50
 
 static GstStaticPadTemplate srctemplate =
@@ -492,6 +492,7 @@ gst_dreamvideosource_getcaps (GstBaseSrc * bsrc, GstCaps * filter)
 		GST_DEBUG_OBJECT (self, "gst_dreamvideosource_getcaps has new_caps: %" GST_PTR_FORMAT " / current_caps: %" GST_PTR_FORMAT "", self->new_caps, self->current_caps);
 		if (self->current_caps)
 		{
+			caps = gst_caps_new_empty ();
 			gst_caps_replace (&caps, self->new_caps);
 			self->new_caps = NULL;
 		}

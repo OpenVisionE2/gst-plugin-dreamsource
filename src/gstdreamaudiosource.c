@@ -59,7 +59,7 @@ static guint gst_dreamaudiosource_signals[LAST_SIGNAL] = { 0 };
 
 #define DEFAULT_BITRATE     128
 #define DEFAULT_SAMPLERATE  48000
-#define DEFAULT_INPUT_MODE  GST_DREAMAUDIOSOURCE_INPUT_MODE_LIVE
+#define DEFAULT_INPUT_MODE  GST_DREAMAUDIOSOURCE_INPUT_MODE_BACKGROUND
 #define DEFAULT_BUFFER_SIZE 80
 
 static GstStaticPadTemplate srctemplate =
