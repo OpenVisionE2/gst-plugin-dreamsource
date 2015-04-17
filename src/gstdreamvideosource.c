@@ -208,6 +208,7 @@ static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32
 static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, VideoFormatInfo * info)
 {
 	g_mutex_lock (&self->mutex);
+	info->bitrate = self->video_info.bitrate;
 	if (!self->encoder || !self->encoder->fd)
 	{
 		self->video_info = *info;
@@ -469,7 +470,7 @@ gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * val
 			g_value_take_boxed (value, gst_dreamvideosource_getcaps (GST_BASE_SRC(object), GST_CAPS_ANY));
 			break;
 		case ARG_BITRATE:
-			g_value_set_int (value, self->video_info.bitrate/1000);
+			g_value_set_int (value, self->video_info.bitrate);
 			break;
 		case ARG_INPUT_MODE:
 			g_value_set_enum (value, gst_dreamvideosource_get_input_mode (self));
@@ -650,7 +651,7 @@ static gboolean gst_dreamvideosource_unlock (GstBaseSrc * bsrc)
 static gboolean gst_dreamvideosource_unlock_stop (GstBaseSrc * bsrc)
 {
 	GstDreamVideoSource *self = GST_DREAMVIDEOSOURCE (bsrc);
-	GST_DEBUG_OBJECT (self, "start creating buffers...");
+	GST_DEBUG_OBJECT (self, "stop flushing...");
 	g_mutex_lock (&self->mutex);
 	self->flushing = FALSE;
 	g_queue_foreach (&self->current_frames, (GFunc) gst_buffer_unref, NULL);

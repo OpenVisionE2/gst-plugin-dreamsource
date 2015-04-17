@@ -376,7 +376,7 @@ gst_dreamaudiosource_get_property (GObject * object, guint prop_id, GValue * val
 
 	switch (prop_id) {
 		case ARG_BITRATE:
-			g_value_set_int (value, self->audio_info.bitrate/1000);
+			g_value_set_int (value, self->audio_info.bitrate);
 			break;
 		case ARG_INPUT_MODE:
 			g_value_set_enum (value, gst_dreamaudiosource_get_input_mode (self));
@@ -455,7 +455,7 @@ static gboolean gst_dreamaudiosource_unlock (GstBaseSrc * bsrc)
 static gboolean gst_dreamaudiosource_unlock_stop (GstBaseSrc * bsrc)
 {
 	GstDreamAudioSource *self = GST_DREAMAUDIOSOURCE (bsrc);
-	GST_DEBUG_OBJECT (self, "start creating buffers...");
+	GST_DEBUG_OBJECT (self, "stop flushing...");
 	g_mutex_lock (&self->mutex);
 	self->flushing = FALSE;
 	g_queue_foreach (&self->current_frames, (GFunc) gst_buffer_unref, NULL);
