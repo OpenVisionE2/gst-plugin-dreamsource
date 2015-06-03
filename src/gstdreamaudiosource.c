@@ -60,7 +60,7 @@ static guint gst_dreamaudiosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_BITRATE     128
 #define DEFAULT_SAMPLERATE  48000
 #define DEFAULT_INPUT_MODE  GST_DREAMAUDIOSOURCE_INPUT_MODE_BACKGROUND
-#define DEFAULT_BUFFER_SIZE 80
+#define DEFAULT_BUFFER_SIZE 26
 
 static GstStaticPadTemplate srctemplate =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -879,14 +879,22 @@ static GstStateChangeReturn gst_dreamaudiosource_change_state (GstElement * elem
 		case GST_STATE_CHANGE_READY_TO_PAUSED:
 			GST_LOG_OBJECT (self, "GST_STATE_CHANGE_READY_TO_PAUSED");
 			self->dreamvideosrc = gst_bin_get_by_name_recurse_up(GST_BIN(GST_ELEMENT_PARENT(self)), "dreamvideosource0");
-
+			if (self->dreamvideosrc)
+			{
+				gint videobitrate = 0;
+				g_object_get (G_OBJECT (self->dreamvideosrc), "bitrate", &videobitrate, NULL);
+				gfloat x = videobitrate/100.0;
+				GST_DEBUG_OBJECT (self, "bitrate/100.0 = %f", x);
+				self->buffer_size = (gint)((-0.0026)*x*x) + (gint)(1.0756*x) + DEFAULT_BUFFER_SIZE; // empirically approximated polynom
+				GST_INFO_OBJECT (self, "%" GST_PTR_FORMAT "'s bitrate=%i -> set internal buffer_size to %i", self->dreamvideosrc, videobitrate, self->buffer_size);
+			}
 			self->dts_offset = GST_CLOCK_TIME_NONE;
 #ifdef PROVIDE_CLOCK
 			gst_element_post_message (element, gst_message_new_clock_provide (GST_OBJECT_CAST (element), self->encoder_clock, TRUE));
 #endif
 			self->flushing = TRUE;
 			self->readthread = g_thread_try_new ("dreamaudiosrc-read", (GThreadFunc) gst_dreamaudiosource_read_thread_func, self, NULL);
-			GST_DEBUG_OBJECT (self, "started readthread @%p", self->readthread );
+			GST_DEBUG_OBJECT (self, "started readthread @%p", self->readthread);
 			break;
 		case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
 			g_mutex_lock (&self->mutex);
