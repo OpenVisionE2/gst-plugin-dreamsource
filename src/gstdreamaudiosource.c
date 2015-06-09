@@ -651,6 +651,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				g_mutex_lock (&self->mutex);
 				if (G_UNLIKELY (self->dts_offset == GST_CLOCK_TIME_NONE))
 				{
+#if 0 // always wait for audio to become valid, don't rely on video pts
 					if (self->dreamvideosrc)
 					{
 						guint64 videosource_dts_offset;
@@ -661,6 +662,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 							self->dts_offset = videosource_dts_offset;
 						}
 					}
+#endif
 					if (self->dts_offset == GST_CLOCK_TIME_NONE)
 					{
 						self->dts_offset = encoder_pts;
@@ -772,8 +774,10 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 		if (self->descriptors_count == self->descriptors_available)
 		{
 			GST_LOG_OBJECT (self, "self->descriptors_count == self->descriptors_available -> release %i consumed descriptors", self->descriptors_count);
+			if (state == READTHREADSTATE_STOP)
+				GST_DEBUG_OBJECT (self, "readthread stopping, don't write to fd anymore!");
 			/* release consumed descs */
-			if (write(enc->fd, &self->descriptors_count, sizeof(self->descriptors_count)) != sizeof(self->descriptors_count)) {
+			else if (write(enc->fd, &self->descriptors_count, sizeof(self->descriptors_count)) != sizeof(self->descriptors_count)) {
 				GST_WARNING_OBJECT (self, "release consumed descs write error!");
 				goto stop_running;
 			}

@@ -820,13 +820,13 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 							self->dts_offset = audiosource_dts_offset;
 						}
 					}
-					if (self->dts_offset == GST_CLOCK_TIME_NONE)
+					else if (self->dts_offset == GST_CLOCK_TIME_NONE)
 					{
 						self->dts_offset = encoder_dts - clock_time;
 						GST_DEBUG_OBJECT (self, "use encoder_dts-clock_time as dts_offset (%" GST_TIME_FORMAT" = %" GST_TIME_FORMAT" - %" GST_TIME_FORMAT")", GST_TIME_ARGS (self->dts_offset), GST_TIME_ARGS (encoder_dts), GST_TIME_ARGS (clock_time));
 					}
 				}
-				if (G_UNLIKELY (self->dts_valid == FALSE))
+				if (G_UNLIKELY (self->dts_valid == FALSE && self->dts_offset != GST_CLOCK_TIME_NONE))
 					self->dts_valid = TRUE;
 				g_mutex_unlock (&self->mutex);
 			}
@@ -842,6 +842,11 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			else
 				g_mutex_unlock (&self->mutex);
 
+			if (G_UNLIKELY (encoder_dts < self->dts_offset))
+			{
+				GST_DEBUG_OBJECT (self, "encoder_dts < dts_offset, skipping frame...");
+				skip_frame = TRUE;
+			}
 // 			if (self->video_info.fps_d)
 // 				GST_BUFFER_DURATION(readbuf) = gst_util_uint64_scale (GST_SECOND, self->video_info.fps_d, self->video_info.fps_n);
 
@@ -931,8 +936,10 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 		if (self->descriptors_count == self->descriptors_available)
 		{
 			GST_LOG_OBJECT (self, "self->descriptors_count == self->descriptors_available -> release %i consumed descriptors", self->descriptors_count);
+			if (state == READTHREADSTATE_STOP)
+				GST_DEBUG_OBJECT (self, "readthread stopping, don't write to fd anymore!");
 			/* release consumed descs */
-			if (write(enc->fd, &self->descriptors_count, sizeof(self->descriptors_count)) != sizeof(self->descriptors_count)) {
+			else if (write(enc->fd, &self->descriptors_count, sizeof(self->descriptors_count)) != sizeof(self->descriptors_count)) {
 				GST_WARNING_OBJECT (self, "release consumed descs write error!");
 				goto stop_running;
 			}
