@@ -63,7 +63,7 @@ static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 #define DEFAULT_FRAMERATE   25
 #define DEFAULT_WIDTH       1280
 #define DEFAULT_HEIGHT      720
-#define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_BACKGROUND
+#define DEFAULT_INPUT_MODE  GST_DREAMVIDEOSOURCE_INPUT_MODE_LIVE
 #define DEFAULT_BUFFER_SIZE 50
 
 static GstStaticPadTemplate srctemplate =
@@ -644,7 +644,9 @@ static gboolean gst_dreamvideosource_unlock (GstBaseSrc * bsrc)
 	self->flushing = TRUE;
 	GST_DEBUG_OBJECT (self, "set flushing TRUE");
 	g_cond_signal (&self->cond);
+	GST_DEBUG_OBJECT (self, "post cond");
 	g_mutex_unlock (&self->mutex);
+	GST_DEBUG_OBJECT (self, "post unlock");
 	return TRUE;
 }
 
@@ -723,13 +725,6 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 			{
 				g_mutex_lock (&self->mutex);
 				gst_clock_get_internal_time(self->encoder_clock);
-				if (self->flushing)
-				{
-					GST_DEBUG_OBJECT (self, "FLUSHING!");
-					g_cond_signal (&self->cond);
-					g_mutex_unlock (&self->mutex);
-					continue;
-				}
 				g_mutex_unlock (&self->mutex);
 				GST_DEBUG_OBJECT (self, "SELECT TIMEOUT");
 				discont = TRUE;
@@ -775,6 +770,14 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				}
 				self->descriptors_available = rlen / VBDSIZE;
 				GST_LOG_OBJECT (self, "encoder buffer was empty, %d descriptors available", self->descriptors_available);
+			}
+			if (self->flushing)
+			{
+				g_mutex_lock (&self->mutex);
+				GST_DEBUG_OBJECT (self, "FLUSHING!");
+				g_cond_signal (&self->cond);
+				g_mutex_unlock (&self->mutex);
+				continue;
 			}
 		}
 
@@ -1104,7 +1107,6 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 			break;
 		case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
 			g_mutex_lock (&self->mutex);
-			self->flushing = TRUE;
 			GST_DEBUG_OBJECT (self, "GST_STATE_CHANGE_PLAYING_TO_PAUSED self->descriptors_count=%i self->descriptors_available=%i", self->descriptors_count, self->descriptors_available);
 			SEND_COMMAND (self, CONTROL_PAUSE);
 			if (self->descriptors_count < self->descriptors_available)
