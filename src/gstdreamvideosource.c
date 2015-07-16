@@ -901,18 +901,16 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 				}
 
 				GST_LOG_OBJECT (self, "post-calibration\n"
-				"%" GST_TIME_FORMAT "=base_time       %" GST_TIME_FORMAT "=clock_time            %" PRId64 "=dts_pts_offset\n"
-				"%" GST_TIME_FORMAT "=encoder_dts     %" GST_TIME_FORMAT "=orig_dts_clock_time   %" GST_TIME_FORMAT "=calib_dts_clock_time   %" GST_TIME_FORMAT "=result_dts\n"
-				"%" GST_TIME_FORMAT "=encoder_pts     %" GST_TIME_FORMAT "=orig_pts_clock_time                                            %" GST_TIME_FORMAT "=result_pts\n"
-				"%" GST_TIME_FORMAT "=internal        %" GST_TIME_FORMAT "=external              %" GST_TIME_FORMAT "=diff\n"
-				"%" GST_TIME_FORMAT "=rate_n          %" GST_TIME_FORMAT "=rate_d\n"
-				"%" GST_TIME_FORMAT "=my_int_time     %" GST_TIME_FORMAT "=pipeline_int_time\n"
+				"  %" GST_TIME_FORMAT " =base_time       %" GST_TIME_FORMAT " =clock_time            %" PRId64 " =dts_pts_offset\n"
+				"  %" GST_TIME_FORMAT " =encoder_dts     %" GST_TIME_FORMAT " =orig_dts_clock_time   %" GST_TIME_FORMAT " =calib_dts_clock_time   %" GST_TIME_FORMAT " =result_dts\n"
+				"  %" GST_TIME_FORMAT " =encoder_pts     %" GST_TIME_FORMAT " =orig_pts_clock_time                                            %" GST_TIME_FORMAT " =result_pts\n"
+				"  %" GST_TIME_FORMAT " =internal        %" GST_TIME_FORMAT " =external              %" GST_TIME_FORMAT " =diff                   %" PRId64 "/%" PRId64 " =rate\n"
+				"  %" GST_TIME_FORMAT " =my_int_time     %" GST_TIME_FORMAT " =pipeline_int_time"
 				,
 				GST_TIME_ARGS (base_time), GST_TIME_ARGS (clock_time), dts_pts_offset,
 				GST_TIME_ARGS (encoder_dts), GST_TIME_ARGS (orig_dts_clock_time), GST_TIME_ARGS (calib_dts_clock_time), GST_TIME_ARGS (result_dts),
 				GST_TIME_ARGS (encoder_pts), GST_TIME_ARGS (orig_pts_clock_time), GST_TIME_ARGS (result_pts),
-				GST_TIME_ARGS (internal), GST_TIME_ARGS (external), GST_TIME_ARGS (diff),
-				GST_TIME_ARGS (rate_n), GST_TIME_ARGS (rate_d),
+				GST_TIME_ARGS (internal), GST_TIME_ARGS (external), GST_TIME_ARGS (diff), rate_n, rate_d,
 				GST_TIME_ARGS (my_int_time), GST_TIME_ARGS (pipeline_int_time)
 				);
 #endif
@@ -967,7 +965,7 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 					discont = FALSE;
 				}
 				g_queue_push_tail (&self->current_frames, readbuf);
-				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue...", readbuf );
+				GST_INFO_OBJECT (self, "read %" GST_PTR_FORMAT " to queue... buffers count=%i", readbuf, g_queue_get_length (&self->current_frames));
 				g_cond_signal (&self->cond);
 			}
 			else
@@ -985,7 +983,7 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 		g_mutex_unlock (&self->mutex);
 		g_cond_signal (&self->cond);
 		GST_DEBUG ("stop running, exit thread");
-		message = gst_message_new_stream_status (GST_OBJECT_CAST (self), GST_STREAM_STATUS_TYPE_ENTER, GST_ELEMENT_CAST (GST_OBJECT_PARENT(self)));
+		message = gst_message_new_stream_status (GST_OBJECT_CAST (self), GST_STREAM_STATUS_TYPE_LEAVE, GST_ELEMENT_CAST (GST_OBJECT_PARENT(self)));
 		g_value_init (&val, GST_TYPE_G_THREAD);
 		g_value_set_boxed (&val, self->readthread);
 		gst_message_set_stream_status_object (message, &val);
