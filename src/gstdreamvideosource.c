@@ -1050,7 +1050,7 @@ static GstStateChangeReturn gst_dreamvideosource_change_state (GstElement * elem
 				self->encoder_clock = gst_element_provide_clock (self->dreamaudiosrc);
 				GST_DEBUG_OBJECT (self, "using dreamaudiosrc's encoder_clock = %" GST_PTR_FORMAT, self->encoder_clock);
 			} else {
-				self->encoder_clock = gst_dreamsource_clock_new ("GstDreamVideoSinkClock", self->encoder->fd);
+				self->encoder_clock = gst_dreamsource_clock_new ("GstDreamVideoSourceClock", self->encoder->fd);
 				GST_OBJECT_FLAG_SET (self, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
 				GstMessage* msg;
 				msg = gst_message_new_clock_provide (GST_OBJECT_CAST (element), self->encoder_clock, TRUE);

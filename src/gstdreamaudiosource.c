@@ -46,6 +46,7 @@ GType gst_dreamaudiosource_input_mode_get_type (void)
 enum
 {
 	SIGNAL_GET_DTS_OFFSET,
+	SIGNAL_LOST,
 	LAST_SIGNAL
 };
 enum
@@ -98,6 +99,8 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self);
 static GstClock *gst_dreamaudiosource_provide_clock (GstElement * elem);
 // static GstClockTime gst_dreamaudiosource_get_encoder_time_ (GstClock * clock, GstBaseSrc * bsrc);
 #endif
+
+static void _gst_dreamaudiosource_emit_signal_lost (GstDreamAudioSource * self);
 
 static void
 gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
@@ -156,6 +159,12 @@ gst_dreamaudiosource_class_init (GstDreamAudioSourceClass * klass)
 		G_STRUCT_OFFSET (GstDreamAudioSourceClass, get_dts_offset),
 		NULL, NULL, gst_dreamsource_marshal_INT64__VOID, G_TYPE_INT64, 0);
 
+	gst_dreamaudiosource_signals[SIGNAL_LOST] =
+		g_signal_new("signal-lost", G_TYPE_FROM_CLASS(klass),
+			G_SIGNAL_RUN_LAST, G_STRUCT_OFFSET(GstDreamAudioSourceClass, signal_lost),
+			NULL, NULL, g_cclosure_marshal_VOID__VOID,
+			G_TYPE_NONE, 0);
+
 	klass->get_dts_offset = gst_dreamaudiosource_get_dts_offset;
 }
 
@@ -164,6 +173,14 @@ gst_dreamaudiosource_get_dts_offset (GstDreamAudioSource *self)
 {
 	GST_DEBUG_OBJECT (self, "gst_dreamaudiosource_get_dts_offset %" GST_TIME_FORMAT"", GST_TIME_ARGS (self->dts_offset) );
 	return self->dts_offset;
+}
+
+static void _gst_dreamaudiosource_emit_signal_lost (GstDreamAudioSource *self)
+{
+	if (!GST_IS_DREAMAUDIOSOURCE (self))
+		return;
+	GST_INFO_OBJECT (self, "emit signal-lost");
+	g_signal_emit (self, gst_dreamaudiosource_signals[SIGNAL_LOST], 0);
 }
 
 static void gst_dreamaudiosource_set_bitrate (GstDreamAudioSource * self, uint32_t bitrate)
@@ -258,6 +275,7 @@ gst_dreamaudiosource_init (GstDreamAudioSource * self)
 
 	self->encoder = NULL;
 	self->encoder_clock = NULL;
+	self->last_ts = GST_CLOCK_TIME_NONE;
 
 #ifdef dump
 	self->dumpfd = open("/media/hdd/movie/dreamaudiosource.dump", O_WRONLY | O_CREAT | O_TRUNC);
@@ -520,6 +538,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 	gst_element_post_message (GST_ELEMENT_CAST (self), message);
 	GstClockTime clock_time, base_time;
 	gboolean discont = TRUE;
+	int timeout;
 
 	while (TRUE) {
 		{
@@ -527,7 +546,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				goto stop_running;
 
 			struct pollfd rfd[2];
-			int timeout, nfds;
+			int nfds;
 
 			rfd[0].fd = READ_SOCKET (self);
 			rfd[0].events = POLLIN | POLLERR | POLLHUP | POLLPRI;
@@ -748,6 +767,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 				if (desc->stCommon.uiLength == 0)
 				{
 					GST_WARNING_OBJECT (self, "ZERO SIZE BUFFER");
+					_gst_dreamaudiosource_emit_signal_lost (self);
 				}
 				memtrack->self = self;
 				memtrack->buffer = readbuf;
@@ -785,8 +805,49 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 		if (readbuf)
 		{
 			g_mutex_lock (&self->mutex);
-			if (gst_buffer_get_size (readbuf) && !self->flushing)
+			if (!self->flushing)
 			{
+				if (gst_buffer_get_size (readbuf) == 0)
+				{
+					GstClockTime duration = timeout * GST_MSECOND;
+#if 1 // generate silence adts frames
+#define ADTS_HEADER_LEN       0x07
+#define AAC_PAYLOAD_LEN       0x06
+#define ADTS_DUMMY_FRAME_LEN  ADTS_HEADER_LEN + AAC_PAYLOAD_LEN
+					gst_buffer_unref(readbuf);
+					readbuf = gst_buffer_new_and_alloc (ADTS_DUMMY_FRAME_LEN);
+					GST_BUFFER_PTS (readbuf) = self->last_ts;
+					GST_BUFFER_DTS (readbuf) = self->last_ts;
+					GST_BUFFER_DURATION (readbuf) = duration;
+					GstMapInfo map;
+					gst_buffer_map (readbuf, &map, GST_MAP_WRITE);
+					guint8 *adts_header = map.data;
+					adts_header[0] = 0xff;
+					adts_header[1] = 0xf1;
+					adts_header[2] = 0x4c;
+					adts_header[3] = 0xb0;
+					adts_header[4] = 0x01;
+					adts_header[5] = 0xA0;
+					adts_header[6] = 0x00;
+					guint8 *payload = map.data+ADTS_HEADER_LEN;
+					payload[0] = 0x21;
+					payload[1] = 0x10;
+					payload[2] = 0x04;
+					payload[3] = 0x60;
+					payload[4] = 0x8c;
+					payload[5] = 0x1c;
+					gst_buffer_unmap (readbuf, &map);
+					GST_DEBUG_OBJECT (self, "Generated silence ADTS frame %" GST_PTR_FORMAT "" , readbuf);
+#else // produce gap events (mpegtsmux doesn't handle gap yet)
+					GstEvent *event = NULL;
+					event = gst_event_new_gap (self->last_ts, duration);
+					GST_DEBUG_OBJECT (self, "Sending %" GST_PTR_FORMAT" (from %" GST_TIME_FORMAT " to %" GST_TIME_FORMAT ")" , event, GST_TIME_ARGS (self->last_ts), GST_TIME_ARGS (self->last_ts+duration));
+					gst_pad_push_event (GST_BASE_SRC_PAD (self), event);
+#endif
+					self->last_ts += duration;
+				}
+				else
+					self->last_ts = GST_BUFFER_PTS(readbuf);
 				while (g_queue_get_length (&self->current_frames) >= self->buffer_size)
 				{
 					GstBuffer * oldbuf = g_queue_pop_head (&self->current_frames);
@@ -804,7 +865,15 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 			}
 			else
 			{
-				GST_INFO_OBJECT (self, "dropping %" GST_PTR_FORMAT " because %s", readbuf, self->flushing?"FLUSHING":"size = 0");
+				if (self->flushing)
+				{
+					GST_INFO_OBJECT (self, "dropping %" GST_PTR_FORMAT " because we're flushing", readbuf);
+					gst_buffer_unref(readbuf);
+				}
+				else
+				{
+
+				}
 				gst_buffer_unref(readbuf);
 			}
 			g_cond_signal (&self->cond);
@@ -842,7 +911,7 @@ gst_dreamaudiosource_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 	g_mutex_lock (&self->mutex);
 	while (g_queue_is_empty (&self->current_frames) && !self->flushing)
 	{
-		GST_INFO_OBJECT (self, "waiting for buffer from encoder");
+		GST_DEBUG_OBJECT (self, "waiting for buffer from encoder");
 		g_cond_wait (&self->cond, &self->mutex);
 	}
 

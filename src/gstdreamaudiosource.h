@@ -113,11 +113,15 @@ struct _GstDreamAudioSource
 	GList *memtrack_list;
 
 	GstClock *encoder_clock;
+	GstClockTime last_ts;
 };
 
 struct _GstDreamAudioSourceClass
 {
 	GstPushSrcClass parent_class;
+	/* signals */
+	void (*signal_lost)  (GstDreamAudioSource *self);
+	/* actions */
 	gint64 (*get_dts_offset) (GstDreamAudioSource *self);
 };
 
