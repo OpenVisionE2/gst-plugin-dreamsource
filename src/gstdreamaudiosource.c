@@ -486,7 +486,7 @@ static void gst_dreamaudiosource_free_buffer (struct _buffer_memorytracker * mem
 {
 	GstDreamAudioSource * self = memtrack->self;
 	GST_OBJECT_LOCK(self);
-	GST_TRACE_OBJECT (self, "freeing %" GST_PTR_FORMAT " uiOffset=%i uiLength=%i used_range_min=%i", memtrack->buffer, memtrack->uiOffset, memtrack->uiLength, self->encoder->used_range_min);
+	GST_TRACE_OBJECT (self, "freeing %" GST_PTR_FORMAT " uiOffset=%i uiLength=%i ", memtrack->buffer, memtrack->uiOffset, memtrack->uiLength);
 	GList *list = g_list_first (self->memtrack_list);
 	guint abs_minimum = UINT32_MAX;
 	guint abs_maximum = 0;
@@ -506,7 +506,7 @@ static void gst_dreamaudiosource_free_buffer (struct _buffer_memorytracker * mem
 			count++;
 			list = g_list_next (list);
 		}
-		GST_TRACE_OBJECT (self, "new abs_minimum=%i, abs_maximum=%i", abs_minimum, abs_maximum);
+		GST_TRACE_OBJECT (self, "previous used_range_min=%i new abs_minimum=%i, abs_maximum=%i", self->encoder->used_range_min, abs_minimum, abs_maximum);
 		self->encoder->used_range_min = abs_minimum;
 		self->encoder->used_range_max = abs_maximum;
 	}
