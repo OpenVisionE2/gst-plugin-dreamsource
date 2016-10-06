@@ -887,7 +887,7 @@ static void gst_dreamaudiosource_read_thread_func (GstDreamAudioSource * self)
 
 	stop_running:
 	{
-		g_mutex_unlock (&self->mutex);
+//		g_mutex_unlock (&self->mutex);
 		g_cond_signal (&self->cond);
 		GST_DEBUG ("stop running, exit thread");
 		message = gst_message_new_stream_status (GST_OBJECT_CAST (self), GST_STREAM_STATUS_TYPE_LEAVE, GST_ELEMENT_CAST (GST_OBJECT_PARENT(self)));

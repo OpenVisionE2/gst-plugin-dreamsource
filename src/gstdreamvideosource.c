@@ -570,6 +570,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 			g_mutex_unlock (&self->mutex);
 			if (gst_caps_is_fixed(caps) && gst_dreamvideosource_set_format(self, &info))
 				ret = gst_pad_push_event (bsrc->srcpad, gst_event_new_caps (caps));
+			g_mutex_lock (&self->mutex);
 		}
 		else {
 			GST_WARNING_OBJECT (self, "unsupported caps: %" GST_PTR_FORMAT, caps);
@@ -578,6 +579,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 	}
 	if (current_caps)
 		gst_caps_unref (current_caps);
+
 	g_mutex_unlock (&self->mutex);
 	return ret;
 }
@@ -980,7 +982,7 @@ static void gst_dreamvideosource_read_thread_func (GstDreamVideoSource * self)
 
 	stop_running:
 	{
-		g_mutex_unlock (&self->mutex);
+//		g_mutex_unlock (&self->mutex);
 		g_cond_signal (&self->cond);
 		GST_DEBUG ("stop running, exit thread");
 		message = gst_message_new_stream_status (GST_OBJECT_CAST (self), GST_STREAM_STATUS_TYPE_LEAVE, GST_ELEMENT_CAST (GST_OBJECT_PARENT(self)));
