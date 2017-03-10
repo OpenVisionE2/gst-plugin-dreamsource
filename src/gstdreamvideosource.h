@@ -36,10 +36,18 @@ G_BEGIN_DECLS
 #define VENC_START          _IO('v', 128)
 #define VENC_STOP           _IO('v', 129)
 #define VENC_SET_BITRATE    _IOW('v', 130, unsigned int)
-#define VENC_SET_RESOLUTION _IOW('v', 131, unsigned int)
+#define VENC_SET_RESOLUTION _IOW('v', 131, unsigned int) /* need restart */
 #define VENC_SET_FRAMERATE  _IOW('v', 132, unsigned int)
+#define VENC_SET_PROFILE    _IOW('v', 133, unsigned int) /* need restart */
+#define VENC_SET_LEVEL      _IOW('v', 134, unsigned int) /* need restart */
+#define VENC_SET_GOP_LENGTH _IOW('v', 135, unsigned int) /* 0 = use specified P-/B-Frames, > 0 use IBBPBBPBBPBBP... for specified amount of ms */
+#define VENC_SET_OPEN_GOP   _IOW('v', 136, unsigned int)
+#define VENC_SET_B_FRAMES   _IOW('v', 137, unsigned int) /* 0..2 ... forced to 1 when gop length is set */
+#define VENC_SET_P_FRAMES   _IOW('v', 138, unsigned int) /* 0..14 ... forced to 2 when gop length is set */
 #define VENC_SET_SOURCE     _IOW('v', 140, unsigned int)
 #define VENC_GET_STC        _IOR('v', 141, uint32_t)
+#define VENC_SET_SLICES_PER_PIC _IOW('v', 142, unsigned int) /* 0 = encode default, max 16 */
+#define VENC_SET_NEW_GOP_ON_NEW_SCENE _IOW('v', 143, unsigned int) /* currently not on mipsel */
 
 enum venc_framerate {
         rate_custom = 0,
@@ -47,6 +55,10 @@ enum venc_framerate {
         rate_30,
         rate_50,
         rate_60,
+        rate_23_976,
+        rate_24,
+        rate_29_97,
+        rate_59_94
 };
 
 enum venc_videoformat {
@@ -54,6 +66,54 @@ enum venc_videoformat {
         fmt_720x576,
         fmt_1280x720,
         fmt_1920x1080,
+};
+
+enum venc_profile {
+        profile_main = 0,
+        profile_high,
+};
+
+enum venc_bitrate {
+        bitrate_min = 16,
+        bitrate_max = 200000,
+};
+
+enum venc_gop_length {
+        gop_length_auto = 0,
+        gop_length_max = 15000
+};
+
+enum venc_bframes {
+        bframes_min = 0,
+        bframes_max = 2,
+};
+
+enum venc_pframes {
+        pframes_min = 0,
+        pframes_max = 14,
+};
+
+enum venc_slices {
+        slices_min = 0,
+        slices_max = 16,
+};
+
+enum level {
+        level1_1,
+        level1_2,
+        level1_3,
+        level2_0,
+        level2_1,
+        level2_2,
+        level3_0,
+        level3_1, /* default */
+        level3_2,
+        level4_0,
+        level4_1,
+        level4_2,
+        level_min = level1_1,
+        level_default = level3_1,
+        level_max = level4_2
 };
 
 typedef enum venc_source {
@@ -80,6 +140,16 @@ struct _VideoFormatInfo {
 	gint fps_d;	/* framerate demnominator */
 
 	gint bitrate;
+
+	gint profile;
+
+	gint gop_length;
+	gboolean gop_scene;
+
+	gint bframes;
+	gint pframes;
+	gint slices;
+	gint level;
 };
 
 #define VBDSIZE 	sizeof(VideoBufferDescriptor)

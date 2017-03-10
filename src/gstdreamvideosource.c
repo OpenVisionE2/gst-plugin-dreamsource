@@ -54,12 +54,24 @@ enum
 	ARG_0,
 	ARG_CAPS,
 	ARG_BITRATE,
-	ARG_INPUT_MODE
+	ARG_INPUT_MODE,
+	ARG_GOP_LENGTH,
+	ARG_GOP_SCENE,
+	ARG_BFRAMES,
+	ARG_PFRAMES,
+	ARG_SLICES,
+	ARG_LEVEL,
 };
 
 static guint gst_dreamvideosource_signals[LAST_SIGNAL] = { 0 };
 
 #define DEFAULT_BITRATE     2048
+#define DEFAULT_GOP_LENGTH  0
+#define DEFAULT_GOP_SCENE   FALSE
+#define DEFAULT_BFRAMES     2
+#define DEFAULT_PFRAMES     1
+#define DEFAULT_SLICES      0
+#define DEFAULT_LEVEL       level_default
 #define DEFAULT_FRAMERATE   25
 #define DEFAULT_WIDTH       1280
 #define DEFAULT_HEIGHT      720
@@ -76,7 +88,7 @@ static GstStaticPadTemplate srctemplate =
 	"framerate = { 25/1, 30/1, 50/1, 60/1 }, "
 	"display-aspect-ratio = { 5/4, 16/9 }, "
 	"stream-format = (string) byte-stream, "
-	"profile = (string) main")
+	"profile = (string) { main, high }")
     );
 
 #define gst_dreamvideosource_parent_class parent_class
@@ -151,7 +163,37 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 
 	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BITRATE,
 	  g_param_spec_int ("bitrate", "Bitrate (kb/s)",
-	    "Bitrate in kbit/sec", 16, 200000, DEFAULT_BITRATE,
+	    "Bitrate in kbit/sec", bitrate_min, bitrate_max, DEFAULT_BITRATE,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_GOP_LENGTH,
+	  g_param_spec_int ("gop-length", "GOP length (ms)",
+	    "GOP length in ms", gop_length_auto, gop_length_max, DEFAULT_GOP_LENGTH,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_GOP_SCENE,
+	  g_param_spec_boolean ("gop-scene", "GOP on scene change",
+	    "New GOP on scene change", FALSE,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BFRAMES,
+	  g_param_spec_int ("bframes", "Number of B-Frames",
+	    "Number of B-Frames before P-Frame", bframes_min, bframes_max, DEFAULT_BFRAMES,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_PFRAMES,
+	  g_param_spec_int ("pframes", "Number of P-Frames",
+	    "Number of P-Frames after B-Frames", pframes_min, pframes_max, DEFAULT_PFRAMES,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_SLICES,
+	  g_param_spec_int ("slices", "Number of slices",
+	    "Number of slices per picture", slices_min, slices_max, DEFAULT_SLICES,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_LEVEL,
+	  g_param_spec_int ("level", "h.264 Level",
+	    "h.264 Level", level_min, level_max, DEFAULT_LEVEL,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	g_object_class_install_property (gobject_class, ARG_CAPS,
@@ -205,10 +247,149 @@ static void gst_dreamvideosource_set_bitrate (GstDreamVideoSource * self, uint32
 	g_mutex_unlock (&self->mutex);
 }
 
+static void gst_dreamvideosource_set_goplen (GstDreamVideoSource * self, uint32_t goplen)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.gop_length = goplen;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	int ret = ioctl(self->encoder->fd, VENC_SET_GOP_LENGTH, &goplen);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video gop length to %i ms!", goplen);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video gop length to %i ms", goplen);
+	self->video_info.gop_length = goplen;
+	g_mutex_unlock (&self->mutex);
+}
+
+static void gst_dreamvideosource_set_gop_on_scene_change (GstDreamVideoSource * self, gboolean enabled)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.gop_scene = enabled;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	int ret = ioctl(self->encoder->fd, VENC_SET_NEW_GOP_ON_NEW_SCENE, &enabled);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video new gop on new scene to %i (unspported?)!", enabled);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video new gop on new scene to %i!", enabled);
+	self->video_info.gop_scene = enabled;
+	g_mutex_unlock (&self->mutex);
+}
+
+static void gst_dreamvideosource_set_bframes (GstDreamVideoSource * self, uint32_t bframes)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.bframes = bframes;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	int ret = ioctl(self->encoder->fd, VENC_SET_B_FRAMES, &bframes);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video b-frames %i!", bframes);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video b-frames to %i", bframes);
+	self->video_info.bframes= bframes;
+	g_mutex_unlock (&self->mutex);
+}
+
+static void gst_dreamvideosource_set_pframes (GstDreamVideoSource * self, uint32_t pframes)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.pframes = pframes;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	int ret = ioctl(self->encoder->fd, VENC_SET_P_FRAMES, &pframes);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video p-frames %i!", pframes);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video p-frames to %i", pframes);
+	self->video_info.pframes= pframes;
+	g_mutex_unlock (&self->mutex);
+}
+
+static void gst_dreamvideosource_set_slices (GstDreamVideoSource * self, uint32_t slices)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.slices = slices;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	int ret = ioctl(self->encoder->fd, VENC_SET_SLICES_PER_PIC, &slices);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video slices to %i %i!", slices, ret);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video slices to %i", slices);
+	self->video_info.slices = slices;
+	g_mutex_unlock (&self->mutex);
+}
+
+static void gst_dreamvideosource_set_level (GstDreamVideoSource * self, uint32_t level)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.level = level;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	int ret = ioctl(self->encoder->fd, VENC_SET_LEVEL, &level);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set h264 level to %i %i!", level, ret);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video h264 level to %i", level);
+	self->video_info.level = level;
+	g_mutex_unlock (&self->mutex);
+}
+
 static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, VideoFormatInfo * info)
 {
 	g_mutex_lock (&self->mutex);
 	info->bitrate = self->video_info.bitrate;
+	info->gop_length = self->video_info.gop_length;
+	info->gop_scene = self->video_info.gop_scene;
+	info->bframes = self->video_info.bframes;
+	info->pframes = self->video_info.pframes;
+	info->slices = self->video_info.slices;
+	info->level = self->video_info.level;
+
 	if (!self->encoder || !self->encoder->fd)
 	{
 		self->video_info = *info;
@@ -232,6 +413,17 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 			case 60:
 				venc_fps = rate_60;
 				break;
+			case 23:
+				venc_fps = rate_23_976;
+				break;
+			case 24:
+				venc_fps = rate_24;
+				break;
+			case 29:
+				venc_fps = rate_29_97;
+				break;
+			case 59:
+				venc_fps = rate_59_94;
 			default:
 				GST_ERROR_OBJECT (self, "invalid framerate %d/%d", info->fps_n, info->fps_d);
 				goto fail;
@@ -267,6 +459,11 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 			goto fail;
 		}
 	}
+
+	if(!ioctl(self->encoder->fd, VENC_SET_PROFILE, &info->profile))
+		GST_INFO_OBJECT (self, "set profile to %d -> ioctl(%d, VENC_SET_PROFILE)", info->profile, self->encoder->fd);
+	else
+		GST_WARNING_OBJECT (self, "can't set profile to %d -> ioctl(%d, VENC_SET_PROFILE)", info->profile, self->encoder->fd);
 
 	self->video_info = *info;
 	g_mutex_unlock (&self->mutex);
@@ -404,6 +601,12 @@ static gboolean gst_dreamvideosource_encoder_init (GstDreamVideoSource * self)
 	fcntl (WRITE_SOCKET (self), F_SETFL, O_NONBLOCK);
 
 	gst_dreamvideosource_set_bitrate (self, self->video_info.bitrate);
+	gst_dreamvideosource_set_goplen(self, self->video_info.gop_length);
+	gst_dreamvideosource_set_bframes(self,  self->video_info.bframes);
+	gst_dreamvideosource_set_pframes(self,  self->video_info.pframes);
+	gst_dreamvideosource_set_gop_on_scene_change(self, self->video_info.gop_scene);
+	gst_dreamvideosource_set_slices(self, self->video_info.slices);
+	gst_dreamvideosource_set_level(self, self->video_info.level);
 	gst_dreamvideosource_set_format (self, &self->video_info);
 	gst_dreamvideosource_set_input_mode (self, self->input_mode);
 
@@ -454,6 +657,24 @@ gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue
 		case ARG_INPUT_MODE:
 			gst_dreamvideosource_set_input_mode (self, g_value_get_enum (value));
 			break;
+		case ARG_GOP_LENGTH:
+			gst_dreamvideosource_set_goplen(self, g_value_get_int (value));
+			break;
+		case ARG_GOP_SCENE:
+			gst_dreamvideosource_set_gop_on_scene_change(self, g_value_get_boolean (value));
+			break;
+		case ARG_BFRAMES:
+			gst_dreamvideosource_set_bframes(self, g_value_get_int (value));
+			break;
+		case ARG_PFRAMES:
+			gst_dreamvideosource_set_pframes(self, g_value_get_int (value));
+			break;
+		case ARG_SLICES:
+			gst_dreamvideosource_set_slices(self, g_value_get_int (value));
+			break;
+		case ARG_LEVEL:
+			gst_dreamvideosource_set_level(self, g_value_get_int (value));
+			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 			break;
@@ -474,6 +695,24 @@ gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * val
 			break;
 		case ARG_INPUT_MODE:
 			g_value_set_enum (value, gst_dreamvideosource_get_input_mode (self));
+			break;
+		case ARG_GOP_LENGTH:
+			g_value_set_int(value, self->video_info.gop_length);
+			break;
+		case ARG_GOP_SCENE:
+			g_value_set_boolean(value, self->video_info.gop_scene);
+			break;
+		case ARG_BFRAMES:
+			g_value_set_int(value, self->video_info.bframes);
+			break;
+		case ARG_PFRAMES:
+			g_value_set_int(value, self->video_info.pframes);
+			break;
+		case ARG_SLICES:
+			g_value_set_int(value, self->video_info.slices);
+			break;
+		case ARG_LEVEL:
+			g_value_set_int(value, self->video_info.level);
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -534,6 +773,7 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 	VideoFormatInfo info;
 	gboolean ret;
 	const GValue *framerate;
+	gint *profile;
 
 	g_mutex_lock (&self->mutex);
 	structure = gst_caps_get_structure (caps, 0);
@@ -564,6 +804,12 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 				info.fps_n = gst_value_get_fraction_numerator (framerate);
 				info.fps_d = gst_value_get_fraction_denominator (framerate);
 			}
+			const gchar* profile = gst_structure_get_string(structure, "profile");
+			if (profile == "high")
+				info.profile = profile_high;
+			else
+				info.profile = profile_main;
+
 			GST_DEBUG_OBJECT (self, "set caps %" GST_PTR_FORMAT, caps);
 			gst_caps_replace (&self->current_caps, caps);
 
