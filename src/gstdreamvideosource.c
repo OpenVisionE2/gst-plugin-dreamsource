@@ -842,13 +842,21 @@ gst_dreamvideosource_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
 				info.fps_n = gst_value_get_fraction_numerator (framerate);
 				info.fps_d = gst_value_get_fraction_denominator (framerate);
 			}
-			const gchar* profile = gst_structure_get_string(structure, "profile");
-			if (profile == "high")
-				info.profile = profile_high;
-			else
-				info.profile = profile_main;
-
 			GST_DEBUG_OBJECT (self, "set caps %" GST_PTR_FORMAT, caps);
+
+			const gchar* profile = gst_structure_get_string(structure, "profile");
+
+			info.profile = profile_main;
+
+			if (!profile)
+				GST_WARNING_OBJECT (self, "profile missing in caps... set main progile");
+			else if (!g_strcmp0 (profile, "high"))
+				info.profile = profile_high;
+			else if (!g_strcmp0 (profile, "main"))
+				info.profile = profile_main;
+			else
+				GST_WARNING_OBJECT (self, "unknown profile '%s' in caps... set main profile");
+
 			gst_caps_replace (&self->current_caps, caps);
 
 			g_mutex_unlock (&self->mutex);
