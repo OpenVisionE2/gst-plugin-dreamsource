@@ -145,6 +145,7 @@ struct _VideoFormatInfo {
 
 	gint gop_length;
 	gboolean gop_scene;
+	gboolean open_gop;
 
 	gint bframes;
 	gint pframes;

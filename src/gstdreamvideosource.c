@@ -57,6 +57,7 @@ enum
 	ARG_INPUT_MODE,
 	ARG_GOP_LENGTH,
 	ARG_GOP_SCENE,
+	ARG_OPEN_GOP,
 	ARG_BFRAMES,
 	ARG_PFRAMES,
 	ARG_SLICES,
@@ -176,6 +177,11 @@ gst_dreamvideosource_class_init (GstDreamVideoSourceClass * klass)
 	    "New GOP on scene change", FALSE,
 	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_OPEN_GOP,
+	  g_param_spec_boolean ("open-gop", "Enable Open GOPs",
+	    "Open GOPs", FALSE,
+	    G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
 	g_object_class_install_property (G_OBJECT_CLASS (klass), ARG_BFRAMES,
 	  g_param_spec_int ("bframes", "Number of B-Frames",
 	    "Number of B-Frames before P-Frame", bframes_min, bframes_max, DEFAULT_BFRAMES,
@@ -272,6 +278,7 @@ static void gst_dreamvideosource_set_goplen (GstDreamVideoSource * self, uint32_
 static void gst_dreamvideosource_set_gop_on_scene_change (GstDreamVideoSource * self, gboolean enabled)
 {
 	g_mutex_lock (&self->mutex);
+	uint32_t en = enabled;
 	if (!self->encoder || !self->encoder->fd)
 	{
 		self->video_info.gop_scene = enabled;
@@ -279,7 +286,7 @@ static void gst_dreamvideosource_set_gop_on_scene_change (GstDreamVideoSource * 
 		return;
 	}
 
-	int ret = ioctl(self->encoder->fd, VENC_SET_NEW_GOP_ON_NEW_SCENE, &enabled);
+	int ret = ioctl(self->encoder->fd, VENC_SET_NEW_GOP_ON_NEW_SCENE, &en);
 	if (ret != 0)
 	{
 		GST_WARNING_OBJECT (self, "can't set video new gop on new scene to %i (unspported?)!", enabled);
@@ -288,6 +295,29 @@ static void gst_dreamvideosource_set_gop_on_scene_change (GstDreamVideoSource * 
 	}
 	GST_INFO_OBJECT (self, "set video new gop on new scene to %i!", enabled);
 	self->video_info.gop_scene = enabled;
+	g_mutex_unlock (&self->mutex);
+}
+
+static void gst_dreamvideosource_set_open_gop (GstDreamVideoSource * self, gboolean enabled)
+{
+	g_mutex_lock (&self->mutex);
+	if (!self->encoder || !self->encoder->fd)
+	{
+		self->video_info.open_gop = enabled;
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+
+	uint32_t en = enabled;
+	int ret = ioctl(self->encoder->fd, VENC_SET_OPEN_GOP, &en);
+	if (ret != 0)
+	{
+		GST_WARNING_OBJECT (self, "can't set video open gop to %i (unspported?)!", enabled);
+		g_mutex_unlock (&self->mutex);
+		return;
+	}
+	GST_INFO_OBJECT (self, "set video open gop to %i!", enabled);
+	self->video_info.open_gop = enabled;
 	g_mutex_unlock (&self->mutex);
 }
 
@@ -385,6 +415,7 @@ static gboolean gst_dreamvideosource_set_format (GstDreamVideoSource * self, Vid
 	info->bitrate = self->video_info.bitrate;
 	info->gop_length = self->video_info.gop_length;
 	info->gop_scene = self->video_info.gop_scene;
+	info->open_gop = self->video_info.open_gop;
 	info->bframes = self->video_info.bframes;
 	info->pframes = self->video_info.pframes;
 	info->slices = self->video_info.slices;
@@ -605,6 +636,7 @@ static gboolean gst_dreamvideosource_encoder_init (GstDreamVideoSource * self)
 	gst_dreamvideosource_set_bframes(self,  self->video_info.bframes);
 	gst_dreamvideosource_set_pframes(self,  self->video_info.pframes);
 	gst_dreamvideosource_set_gop_on_scene_change(self, self->video_info.gop_scene);
+	gst_dreamvideosource_set_open_gop(self, self->video_info.open_gop);
 	gst_dreamvideosource_set_slices(self, self->video_info.slices);
 	gst_dreamvideosource_set_level(self, self->video_info.level);
 	gst_dreamvideosource_set_format (self, &self->video_info);
@@ -663,6 +695,9 @@ gst_dreamvideosource_set_property (GObject * object, guint prop_id, const GValue
 		case ARG_GOP_SCENE:
 			gst_dreamvideosource_set_gop_on_scene_change(self, g_value_get_boolean (value));
 			break;
+		case ARG_OPEN_GOP:
+			gst_dreamvideosource_set_open_gop(self, g_value_get_boolean (value));
+			break;
 		case ARG_BFRAMES:
 			gst_dreamvideosource_set_bframes(self, g_value_get_int (value));
 			break;
@@ -701,6 +736,9 @@ gst_dreamvideosource_get_property (GObject * object, guint prop_id, GValue * val
 			break;
 		case ARG_GOP_SCENE:
 			g_value_set_boolean(value, self->video_info.gop_scene);
+			break;
+		case ARG_OPEN_GOP:
+			g_value_set_boolean(value, self->video_info.open_gop);
 			break;
 		case ARG_BFRAMES:
 			g_value_set_int(value, self->video_info.bframes);
